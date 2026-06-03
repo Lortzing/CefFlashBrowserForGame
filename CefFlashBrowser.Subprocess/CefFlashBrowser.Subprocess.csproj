@@ -22,4 +22,11 @@
     <PackageReference Include="CefSharp.Common" Version="84.4.10" />
   </ItemGroup>
 
+  <Target Name="StopRunningCefFlashBrowserSubprocess"
+          BeforeTargets="CopyFilesToOutputDirectory"
+          Condition="'$(OS)' == 'Windows_NT'">
+    <Exec Command="taskkill /F /T /IM &quot;CefFlashBrowser.Subprocess.exe&quot;"
+          IgnoreExitCode="true" />
+  </Target>
+
 </Project>
