@@ -58,7 +58,28 @@ namespace CefFlashBrowser.Subprocess
             {
                 Environment.FailFast("Failed to load SpeedGear backend DLL: " + path);
             }
+
+            var initializeAddress = GetProcAddress(module, "CefFlashBrowserSpeedGearInitialize");
+            if (initializeAddress == IntPtr.Zero)
+            {
+                Environment.FailFast("SpeedGear backend initialize export not found: " + path);
+            }
+
+            var initialize = (SpeedGearInitializeDelegate)Marshal.GetDelegateForFunctionPointer(
+                initializeAddress,
+                typeof(SpeedGearInitializeDelegate));
+            if (!initialize())
+            {
+                Environment.FailFast("SpeedGear backend initialization failed: " + path);
+            }
         }
+
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private delegate bool SpeedGearInitializeDelegate();
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = true)]
+        private static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr LoadLibrary(string lpFileName);

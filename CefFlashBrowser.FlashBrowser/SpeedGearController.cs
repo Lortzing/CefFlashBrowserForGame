@@ -20,6 +20,19 @@ namespace CefFlashBrowser.FlashBrowser
         private static long _generation;
         private static double _factor = DefaultFactor;
 
+        public static event Action<double> FactorChanged;
+
+        public static double CurrentFactor
+        {
+            get
+            {
+                lock (SyncRoot)
+                {
+                    return _factor;
+                }
+            }
+        }
+
         public static void EnsureInitialized()
         {
             lock (SyncRoot)
@@ -46,15 +59,22 @@ namespace CefFlashBrowser.FlashBrowser
         public static double SetFactor(double factor)
         {
             factor = NormalizeFactor(factor);
+            var changed = false;
 
             lock (SyncRoot)
             {
                 EnsureInitialized();
+                changed = Math.Abs(_factor - factor) > double.Epsilon;
                 _factor = factor;
                 WriteSharedStateLocked(factor);
             }
 
             Debug.WriteLine($"[SpeedGear] factor = {factor:0.###}x");
+            if (changed)
+            {
+                FactorChanged?.Invoke(factor);
+            }
+
             return factor;
         }
 

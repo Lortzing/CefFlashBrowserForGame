@@ -107,7 +107,7 @@
 
             <Separator/>
 
-            <MenuItem Header="变速齿轮"
+            <MenuItem Header="全局变速齿轮"
                       ItemsSource="{Binding SpeedGearOptions}">
                 <MenuItem.ItemContainerStyle>
                     <Style TargetType="MenuItem"

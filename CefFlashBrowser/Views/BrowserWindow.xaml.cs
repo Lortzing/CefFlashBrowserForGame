@@ -298,6 +298,7 @@ namespace CefFlashBrowser.Views
             base.OnClosed(e);
             _isClosed = true;
             _hwndSource?.RemoveHook(WndProc);
+            ViewModel?.Dispose();
         }
 
         private void OpenBottomContextMenu(UIElement target, ContextMenu menu)

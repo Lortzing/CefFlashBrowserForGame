@@ -13,11 +13,14 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
+using System.Windows;
 
 namespace CefFlashBrowser.ViewModels
 {
-    public class BrowserWindowViewModel : ViewModelBase
+    public class BrowserWindowViewModel : ViewModelBase, IDisposable
     {
+        private bool _disposed;
+
         public DelegateCommand ShowMainWindowCommand { get; set; }
         public DelegateCommand ViewSourceCommand { get; set; }
         public DelegateCommand OpenInDefaultBrowserCommand { get; set; }
@@ -93,7 +96,7 @@ namespace CefFlashBrowser.ViewModels
             }
         }
 
-        private double _speedFactor = 1.0;
+        private double _speedFactor = SpeedGearController.DefaultFactor;
         public double SpeedFactor
         {
             get => _speedFactor;
@@ -355,6 +358,9 @@ namespace CefFlashBrowser.ViewModels
 
         public BrowserWindowViewModel()
         {
+            SpeedFactor = SpeedGearController.CurrentFactor;
+            SpeedGearController.FactorChanged += OnGlobalSpeedFactorChanged;
+
             ShowMainWindowCommand = new DelegateCommand(ShowMainWindow);
             ViewSourceCommand = new DelegateCommand<string>(ViewSource);
             OpenInDefaultBrowserCommand = new DelegateCommand<string>(OpenInDefaultBrowser);
@@ -375,6 +381,48 @@ namespace CefFlashBrowser.ViewModels
             {
                 ZoomLevel = GlobalData.Settings.BrowserZoomLevel;
             }
+        }
+
+        private void OnGlobalSpeedFactorChanged(double factor)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher != null && !dispatcher.CheckAccess())
+            {
+                dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (!_disposed)
+                    {
+                        SpeedFactor = factor;
+                    }
+                }));
+                return;
+            }
+
+            SpeedFactor = factor;
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!_disposed)
+            {
+                if (disposing)
+                {
+                    SpeedGearController.FactorChanged -= OnGlobalSpeedFactorChanged;
+                }
+
+                _disposed = true;
+            }
+        }
+
+        public void Dispose()
+        {
+            Dispose(disposing: true);
+            GC.SuppressFinalize(this);
         }
     }
 }

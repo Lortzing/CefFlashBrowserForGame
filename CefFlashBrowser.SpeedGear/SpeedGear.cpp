@@ -70,9 +70,11 @@ namespace
     DWORD g_lastPatchFailureCount = 0;
     wchar_t g_lastPatchFailedModule[MAX_PATH]{};
     volatile LONG g_patchRequested = 1;
+    volatile LONG g_initializeState = 0; // 0 none, 1 initializing, 2 initialized, -1 failed.
 
     static void InitSharedState();
     static void PatchAllModules();
+    static bool InitializeSpeedGear();
 
     DWORD g_realBaseTick = 0;
     DWORD g_virtualBaseTick = 0;
@@ -874,7 +876,7 @@ namespace
         OutputDebugStringW(message);
     }
 
-    DWORD WINAPI SpeedGearWorker(LPVOID)
+    static void ResolveApiPointers()
     {
         g_debugEnabled = IsDebugEnabled();
         DebugWrite(L"[SpeedGear] DLL loaded\n");
@@ -899,9 +901,56 @@ namespace
         RealTimeGetTime = reinterpret_cast<TimeGetTimeFn>(Resolve(L"winmm.dll", "timeGetTime"));
         RealTimeSetEvent = reinterpret_cast<TimeSetEventFn>(Resolve(L"winmm.dll", "timeSetEvent"));
         RealTimeKillEvent = reinterpret_cast<TimeKillEventFn>(Resolve(L"winmm.dll", "timeKillEvent"));
+    }
 
-        InitSharedState();
-        InitializeBases();
+    static bool HasRequiredApiPointers()
+    {
+        return RealSleep != nullptr
+            && RealSleepEx != nullptr
+            && RealGetTickCount != nullptr
+            && RealGetTickCount64 != nullptr
+            && RealQueryPerformanceCounter != nullptr
+            && RealQueryPerformanceFrequency != nullptr
+            && RealLoadLibraryA != nullptr
+            && RealLoadLibraryExA != nullptr
+            && RealLoadLibraryW != nullptr
+            && RealLoadLibraryExW != nullptr
+            && RealGetProcAddress != nullptr;
+    }
+
+    static bool InitializeSpeedGear()
+    {
+        const auto previous = InterlockedCompareExchange(&g_initializeState, 1, 0);
+        if (previous == 2)
+            return true;
+
+        if (previous == 0)
+        {
+            ResolveApiPointers();
+            if (!HasRequiredApiPointers())
+            {
+                InterlockedExchange(&g_initializeState, -1);
+                return false;
+            }
+
+            InitSharedState();
+            InitializeBases();
+            InterlockedExchange(&g_patchRequested, 0);
+            PatchAllModules();
+            InterlockedExchange(&g_initializeState, 2);
+            return true;
+        }
+
+        while (g_initializeState == 1)
+            ::Sleep(1);
+
+        return g_initializeState == 2;
+    }
+
+    DWORD WINAPI SpeedGearWorker(LPVOID)
+    {
+        if (!InitializeSpeedGear())
+            return 1;
 
         for (;;)
         {
@@ -934,6 +983,11 @@ namespace
                 g_speed = speed > 0 ? speed : 1.0;
         }
     }
+}
+
+extern "C" __declspec(dllexport) BOOL WINAPI CefFlashBrowserSpeedGearInitialize()
+{
+    return InitializeSpeedGear() ? TRUE : FALSE;
 }
 
 extern "C" __declspec(dllexport) void WINAPI CefFlashBrowserSpeedGearLoaded() {}

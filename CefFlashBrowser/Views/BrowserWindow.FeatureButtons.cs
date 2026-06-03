@@ -54,7 +54,7 @@ namespace CefFlashBrowser.Views
 
         private Button CreateSpeedGearButton()
         {
-            var button = CreateToolbarButton("⏩", "变速齿轮");
+            var button = CreateToolbarButton("⏩", "全局变速齿轮");
             button.Click += delegate
             {
                 if (_speedGearMenu == null)
@@ -108,6 +108,8 @@ namespace CefFlashBrowser.Views
                 HorizontalOffset = 8
             };
 
+            menu.Items.Add(new MenuItem { Header = "全局倍率", IsEnabled = false });
+            menu.Items.Add(new Separator());
             menu.Items.Add(CreateSpeedGearMenuItem("0.5x", 0.5));
             menu.Items.Add(CreateSpeedGearMenuItem("1x", 1.0));
             menu.Items.Add(CreateSpeedGearMenuItem("2x", 2.0));

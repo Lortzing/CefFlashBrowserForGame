@@ -135,11 +135,11 @@ namespace CefFlashBrowser.FlashBrowser
 
         public bool IsInputMemoryRecording { get; private set; }
 
-        public double SpeedGearFactor { get; private set; } = SpeedGearController.DefaultFactor;
+        public double SpeedGearFactor => SpeedGearController.CurrentFactor;
 
         public void SetSpeedGearFactor(double factor)
         {
-            SpeedGearFactor = SpeedGearController.SetFactor(factor);
+            SpeedGearController.SetFactor(factor);
         }
 
         public void ResetSpeedGear()
