@@ -34,6 +34,7 @@ namespace CefFlashBrowser
 
                 Win32.SetDllDirectory(GlobalData.CefDllPath);
                 AppDomain.CurrentDomain.AssemblyResolve += ResolveCefSharpAssembly;
+                FeatureDiagnostics.MessageLogged += OnFeatureDiagnosticMessageLogged;
 
                 if (isNewInstance)
                 {
@@ -107,6 +108,8 @@ namespace CefFlashBrowser
         private static void InitCefFlash()
         {
             Environment.SetEnvironmentVariable("ComSpec", GlobalData.EmptyExePath); //Remove black popup window
+            var nativeSpeedGearEnabled = IsNativeSpeedGearEnabled();
+            SpeedGearController.SetNativeBackendEnabled(nativeSpeedGearEnabled);
             SpeedGearController.EnsureInitialized();
 
             var settings = new CefFlashSettings()
@@ -121,14 +124,19 @@ namespace CefFlashBrowser
 
             var appSubprocessPath = Path.Combine(GlobalData.AppBaseDirectory, "CefFlashBrowser.Subprocess.exe");
             var speedGearPath = Path.Combine(GlobalData.AppBaseDirectory, "CefFlashBrowser.SpeedGear.dll");
-            if (IsNativeSpeedGearEnabled() && File.Exists(appSubprocessPath) && File.Exists(speedGearPath))
+            if (nativeSpeedGearEnabled && File.Exists(appSubprocessPath) && File.Exists(speedGearPath))
             {
                 settings.BrowserSubprocessPath = appSubprocessPath;
+                LogHelper.LogInfo($"SpeedGear native backend enabled. BrowserSubprocessPath={appSubprocessPath}");
             }
-            else if (IsNativeSpeedGearEnabled())
+            else if (nativeSpeedGearEnabled)
             {
                 LogHelper.LogError(
                     $"SpeedGear backend files not found, falling back to default CefSharp subprocess. Subprocess: {appSubprocessPath}, SpeedGear: {speedGearPath}");
+            }
+            else
+            {
+                LogHelper.LogInfo("SpeedGear native backend disabled. Using stock CefSharp browser subprocess; speed factor changes will not hook CEF subprocess time APIs.");
             }
 
             if (GlobalData.Settings.FakeFlashVersionSetting.Enable)
@@ -164,6 +172,19 @@ namespace CefFlashBrowser
 
             settings.CefCommandLineArgs["autoplay-policy"] = "no-user-gesture-required";
             Cef.Initialize(settings);
+            LogHelper.LogInfo($"CEF initialized. BrowserSubprocessPath={settings.BrowserSubprocessPath}, CachePath={settings.CachePath}, CefLogPath={settings.LogFile}");
+        }
+
+        private static void OnFeatureDiagnosticMessageLogged(string message)
+        {
+            try
+            {
+                LogHelper.LogInfo(message);
+            }
+            catch
+            {
+                Debug.WriteLine(message);
+            }
         }
 
         private static bool IsNativeSpeedGearEnabled()
@@ -213,6 +234,7 @@ namespace CefFlashBrowser
 
         private static void UnregisterServices()
         {
+            FeatureDiagnostics.MessageLogged -= OnFeatureDiagnosticMessageLogged;
             SimpleIoc.Global.Unregister<ILogger>();
         }
     }

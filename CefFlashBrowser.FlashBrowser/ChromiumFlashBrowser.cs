@@ -247,6 +247,7 @@ namespace CefFlashBrowser.FlashBrowser
 
         private bool _isInputMemoryStatusPolling;
         private int _inputMemoryPlaybackVersion;
+        private DateTime _lastInputMemoryFailureLogTime = DateTime.MinValue;
 
         public string InputMemoryStatusText
         {
@@ -270,9 +271,11 @@ namespace CefFlashBrowser.FlashBrowser
             if (!CanExecuteJavascriptInMainFrame)
             {
                 SetInputMemoryStatus("页面尚未就绪，不能开始录制");
+                FeatureDiagnostics.Log("InputMemory", "start recording rejected: main frame is not ready");
                 return;
             }
 
+            FeatureDiagnostics.Log("InputMemory", "start recording requested; backend=javascript-dom-events");
             IsInputMemoryRecording = true;
             IsInputMemoryPlaying = false;
             _inputMemoryPlaybackVersion++;
@@ -284,6 +287,7 @@ namespace CefFlashBrowser.FlashBrowser
 
         public void StopInputMemoryRecording()
         {
+            FeatureDiagnostics.Log("InputMemory", $"stop recording requested; count={InputMemoryEventCount}");
             IsInputMemoryRecording = false;
             if (CanExecuteJavascriptInMainFrame)
             {
@@ -301,15 +305,20 @@ namespace CefFlashBrowser.FlashBrowser
         {
             IsInputMemoryRecording = false;
             if (!CanExecuteJavascriptInMainFrame)
+            {
+                FeatureDiagnostics.Log("InputMemory", "replay rejected: main frame is not ready");
                 return;
+            }
 
             await RefreshInputMemoryStatusAsync();
             if (InputMemoryEventCount <= 0)
             {
                 SetInputMemoryStatus("当前脚本为空，不能回放");
+                FeatureDiagnostics.Log("InputMemory", "replay rejected: event list is empty");
                 return;
             }
 
+            FeatureDiagnostics.Log("InputMemory", $"replay requested; count={InputMemoryEventCount} speed={speed:0.###} loopCount={loopCount} loopIntervalMs={loopIntervalMs}");
             var playbackVersion = ++_inputMemoryPlaybackVersion;
             IsInputMemoryPlaying = true;
             for (var i = countdownSeconds; i > 0; i--)
@@ -333,6 +342,7 @@ namespace CefFlashBrowser.FlashBrowser
 
         public void StopInputMemoryPlayback()
         {
+            FeatureDiagnostics.Log("InputMemory", $"stop playback requested; count={InputMemoryEventCount}");
             _inputMemoryPlaybackVersion++;
             IsInputMemoryPlaying = false;
             if (CanExecuteJavascriptInMainFrame)
@@ -344,6 +354,7 @@ namespace CefFlashBrowser.FlashBrowser
 
         public void ClearInputMemory()
         {
+            FeatureDiagnostics.Log("InputMemory", $"clear requested; count={InputMemoryEventCount}");
             IsInputMemoryRecording = false;
             IsInputMemoryPlaying = false;
             _inputMemoryPlaybackVersion++;
@@ -358,23 +369,34 @@ namespace CefFlashBrowser.FlashBrowser
         public async Task<string> ExportInputMemoryEventsJsonAsync()
         {
             if (!CanExecuteJavascriptInMainFrame)
+            {
+                FeatureDiagnostics.Log("InputMemory", "export requested while main frame is not ready");
                 return "[]";
+            }
 
             var response = await EvaluateInputMemoryScriptAsync(
                 InputMemoryBootstrapScript + "\nJSON.stringify(window.__cefInputMemory.exportEvents());");
             if (response == null)
+            {
+                FeatureDiagnostics.Log("InputMemory", "export failed: javascript response is null");
                 return "[]";
+            }
 
             var json = response.Success ? response.Result as string : null;
             await RefreshInputMemoryStatusAsync();
+            FeatureDiagnostics.Log("InputMemory", $"export completed; success={response.Success} count={InputMemoryEventCount}");
             return string.IsNullOrWhiteSpace(json) ? "[]" : json;
         }
 
         public async Task ImportInputMemoryEventsJsonAsync(string eventsJson)
         {
             if (!CanExecuteJavascriptInMainFrame)
+            {
+                FeatureDiagnostics.Log("InputMemory", "import requested while main frame is not ready");
                 return;
+            }
 
+            FeatureDiagnostics.Log("InputMemory", $"import requested; jsonLength={(eventsJson ?? string.Empty).Length}");
             var script = InputMemoryBootstrapScript
                 + "\nwindow.__cefInputMemory.importEvents(JSON.parse("
                 + ToJavaScriptStringLiteral(eventsJson ?? "[]")
@@ -391,7 +413,10 @@ namespace CefFlashBrowser.FlashBrowser
             var response = await EvaluateInputMemoryScriptAsync(
                 InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.state();");
             if (response == null || !response.Success || !(response.Result is System.Collections.Generic.IDictionary<string, object> state))
+            {
+                LogInputMemoryFailure($"status refresh failed; responseNull={response == null} success={response?.Success}");
                 return;
+            }
 
             IsInputMemoryRecording = GetBool(state, "recording");
             IsInputMemoryPlaying = GetBool(state, "playing");
@@ -450,9 +475,19 @@ namespace CefFlashBrowser.FlashBrowser
             }
             catch (Exception e)
             {
-                Debug.WriteLine($"[InputMemory] Failed to evaluate script: {e.Message}");
+                LogInputMemoryFailure("failed to evaluate script", e);
                 return null;
             }
+        }
+
+        private void LogInputMemoryFailure(string message, Exception exception = null)
+        {
+            var now = DateTime.UtcNow;
+            if ((now - _lastInputMemoryFailureLogTime).TotalSeconds < 5)
+                return;
+
+            _lastInputMemoryFailureLogTime = now;
+            FeatureDiagnostics.Log("InputMemory", message, exception);
         }
 
 
@@ -462,6 +497,7 @@ namespace CefFlashBrowser.FlashBrowser
 
             if (e.Frame.IsMain)
             {
+                FeatureDiagnostics.Log("InputMemory", "main frame load start; resetting input memory state");
                 IsInputMemoryRecording = false;
                 IsInputMemoryPlaying = false;
                 InputMemoryEventCount = 0;
@@ -477,6 +513,7 @@ namespace CefFlashBrowser.FlashBrowser
 
             if (e.Frame.IsMain)
             {
+                FeatureDiagnostics.Log("InputMemory", "main frame load end; injecting javascript input memory backend");
                 e.Frame.ExecuteJavaScriptAsync(InputMemoryBootstrapScript);
             }
         }

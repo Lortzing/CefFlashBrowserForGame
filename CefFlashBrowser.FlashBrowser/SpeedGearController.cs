@@ -19,6 +19,7 @@ namespace CefFlashBrowser.FlashBrowser
         private static MemoryMappedViewAccessor _accessor;
         private static long _generation;
         private static double _factor = DefaultFactor;
+        private static bool _nativeBackendEnabled;
 
         public static event Action<double> FactorChanged;
 
@@ -53,7 +54,18 @@ namespace CefFlashBrowser.FlashBrowser
                     MemoryMappedFileAccess.ReadWrite);
 
                 WriteSharedStateLocked(_factor);
+                FeatureDiagnostics.Log("SpeedGear", $"shared state initialized mapping={MappingName} factor={_factor:0.###}x nativeBackend={_nativeBackendEnabled}");
             }
+        }
+
+        public static void SetNativeBackendEnabled(bool enabled)
+        {
+            lock (SyncRoot)
+            {
+                _nativeBackendEnabled = enabled;
+            }
+
+            FeatureDiagnostics.Log("SpeedGear", $"native backend {(enabled ? "enabled" : "disabled")}");
         }
 
         public static double SetFactor(double factor)
@@ -69,7 +81,12 @@ namespace CefFlashBrowser.FlashBrowser
                 WriteSharedStateLocked(factor);
             }
 
-            Debug.WriteLine($"[SpeedGear] factor = {factor:0.###}x");
+            FeatureDiagnostics.Log("SpeedGear", $"factor set to {factor:0.###}x nativeBackend={_nativeBackendEnabled}");
+            if (!_nativeBackendEnabled && Math.Abs(factor - DefaultFactor) > double.Epsilon)
+            {
+                FeatureDiagnostics.Log("SpeedGear", "native backend is disabled; factor was written to shared memory but CEF subprocesses are not using the SpeedGear hook path");
+            }
+
             if (changed)
             {
                 FactorChanged?.Invoke(factor);

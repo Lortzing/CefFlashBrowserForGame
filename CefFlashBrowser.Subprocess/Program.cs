@@ -15,10 +15,15 @@ namespace CefFlashBrowser.Subprocess
             var cefPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Assets", "CefSharp");
             SetDllDirectory(cefPath);
             AppDomain.CurrentDomain.AssemblyResolve += ResolveCefSharpAssembly;
+            WriteDiagnostic("started args=" + string.Join(" ", args ?? Array.Empty<string>()));
 
             if (ShouldLoadSpeedGearBackend(args))
             {
                 TryLoadSpeedGearBackend();
+            }
+            else
+            {
+                WriteDiagnostic("SpeedGear backend skipped for this subprocess");
             }
             return RunCefSelfHost(args);
         }
@@ -113,21 +118,21 @@ namespace CefFlashBrowser.Subprocess
 
             if (!File.Exists(path))
             {
-                Debug.WriteLine("[SpeedGear] backend DLL not found: " + path);
+                WriteDiagnostic("SpeedGear backend DLL not found: " + path);
                 return false;
             }
 
             var module = LoadLibrary(path);
             if (module == IntPtr.Zero)
             {
-                Debug.WriteLine("[SpeedGear] failed to load backend DLL: " + path);
+                WriteDiagnostic("failed to load SpeedGear backend DLL: " + path);
                 return false;
             }
 
             var initializeAddress = GetProcAddress(module, "CefFlashBrowserSpeedGearInitialize");
             if (initializeAddress == IntPtr.Zero)
             {
-                Debug.WriteLine("[SpeedGear] initialize export not found: " + path);
+                WriteDiagnostic("SpeedGear initialize export not found: " + path);
                 return false;
             }
 
@@ -136,11 +141,29 @@ namespace CefFlashBrowser.Subprocess
                 typeof(SpeedGearInitializeDelegate));
             if (!initialize())
             {
-                Debug.WriteLine("[SpeedGear] backend initialization failed: " + path);
+                WriteDiagnostic("SpeedGear backend initialization failed: " + path);
                 return false;
             }
 
+            WriteDiagnostic("SpeedGear backend initialized: " + path);
             return true;
+        }
+
+        private static void WriteDiagnostic(string message)
+        {
+            var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} | [Subprocess] {message}";
+            Debug.WriteLine(line);
+
+            try
+            {
+                var dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+                Directory.CreateDirectory(dir);
+                var path = Path.Combine(dir, $"subprocess_{DateTime.Now:yyyyMMdd}.log");
+                File.AppendAllText(path, line + Environment.NewLine);
+            }
+            catch
+            {
+            }
         }
 
         [UnmanagedFunctionPointer(CallingConvention.Winapi)]
