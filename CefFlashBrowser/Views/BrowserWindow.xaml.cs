@@ -1,4 +1,5 @@
 ﻿using CefFlashBrowser.Data;
+using CefFlashBrowser.FlashBrowser;
 using CefFlashBrowser.FlashBrowser.Handlers;
 using CefFlashBrowser.Models;
 using CefFlashBrowser.Utils;
@@ -179,6 +180,7 @@ namespace CefFlashBrowser.Views
             browser.DownloadHandler = new Utils.Handlers.DownloadHandler();
             browser.LifeSpanHandler = new BrowserLifeSpanHandler(this);
             browser.MenuHandler = new BrowserMenuHandler(this);
+            browser.InputMemoryNativeKeyDown += BrowserInputMemoryNativeKeyDown;
 
             Messenger.Global.Register(MessageTokens.DEVTOOLS_OPENED, DevToolsOpenedHandler);
             Messenger.Global.Register(MessageTokens.DEVTOOLS_CLOSED, DevToolsClosedHandler);
@@ -193,6 +195,7 @@ namespace CefFlashBrowser.Views
                 Messenger.Global.Unregister(MessageTokens.FULLSCREEN_CHANGED, FullScreenChangedHandler);
                 Messenger.Global.Unregister(MessageTokens.CLOSE_ALL_BROWSERS, CloseBrowserHandler);
                 Messenger.Global.Unregister(MessageTokens.FOCUS_FIND_POPUP, FocusFindPopupHandler);
+                browser.InputMemoryNativeKeyDown -= BrowserInputMemoryNativeKeyDown;
             };
         }
 
@@ -214,33 +217,23 @@ namespace CefFlashBrowser.Views
         {
             base.OnKeyDown(e);
 
-            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.F8)
+            if (HandleInputMacroShortcut(GetShortcutKey(e), Keyboard.Modifiers))
             {
-                if (browser.IsInputMemoryPlaying)
-                    browser.StopInputMemoryPlayback();
-                else if (browser.IsInputMemoryRecording)
-                    browser.StopInputMemoryRecording();
-                else
-                    browser.StartInputMemoryRecording();
-                e.Handled = true;
-                return;
-            }
-
-            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.F9)
-            {
-                if (browser.IsInputMemoryPlaying)
-                    browser.StopInputMemoryPlayback();
-                else
-                    _ = ReplayInputMemoryFromShortcutAsync();
                 e.Handled = true;
                 return;
             }
 
             if (e.Key == Key.Escape)
             {
-                if (browser.IsInputMemoryRecording || browser.IsInputMemoryPlaying)
+                if (browser.IsInputMemoryRecording)
                 {
                     browser.StopInputMemoryRecording();
+                    e.Handled = true;
+                    return;
+                }
+
+                if (browser.IsInputMemoryPlaying)
+                {
                     browser.StopInputMemoryPlayback();
                     e.Handled = true;
                     return;
@@ -264,12 +257,178 @@ namespace CefFlashBrowser.Views
         {
             try
             {
-                await browser.ReplayInputMemoryAsync();
+                await ReplaySelectedInputMacroAsync();
             }
             catch (Exception ex)
             {
                 LogHelper.LogError("Failed to replay input macro from shortcut", ex);
                 WindowManager.ShowError(ex.Message);
+            }
+        }
+
+        private void BrowserInputMemoryNativeKeyDown(object sender, ChromiumFlashBrowser.InputMemoryNativeKeyEventArgs e)
+        {
+            var key = KeyInterop.KeyFromVirtualKey(e.VirtualKey);
+            var modifiers = Keyboard.Modifiers;
+            if (!IsConfiguredInputMacroShortcut(key, modifiers))
+            {
+                return;
+            }
+
+            e.Handled = true;
+            if (Dispatcher.CheckAccess())
+            {
+                HandleInputMacroShortcut(key, modifiers);
+            }
+            else
+            {
+                Dispatcher.BeginInvoke(new Action(() => HandleInputMacroShortcut(key, modifiers)));
+            }
+        }
+
+        private bool HandleInputMacroShortcut(Key key, ModifierKeys modifiers)
+        {
+            if (IsInputMacroShortcut(key, modifiers, GlobalData.Settings.InputMacroRecordShortcut))
+            {
+                if (browser.IsInputMemoryPlaying)
+                    browser.StopInputMemoryPlayback();
+                else if (browser.IsInputMemoryRecording)
+                    browser.StopInputMemoryRecording();
+                else
+                    browser.StartInputMemoryRecording();
+                return true;
+            }
+
+            if (IsInputMacroShortcut(key, modifiers, GlobalData.Settings.InputMacroStopShortcut))
+            {
+                if (browser.IsInputMemoryPlaying)
+                    browser.StopInputMemoryPlayback();
+                return true;
+            }
+
+            if (IsInputMacroShortcut(key, modifiers, GlobalData.Settings.InputMacroReplayShortcut))
+            {
+                if (!browser.IsInputMemoryPlaying)
+                    _ = ReplayInputMemoryFromShortcutAsync();
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsConfiguredInputMacroShortcut(Key key, ModifierKeys modifiers)
+        {
+            return IsInputMacroShortcut(key, modifiers, GlobalData.Settings.InputMacroRecordShortcut)
+                || IsInputMacroShortcut(key, modifiers, GlobalData.Settings.InputMacroStopShortcut)
+                || IsInputMacroShortcut(key, modifiers, GlobalData.Settings.InputMacroReplayShortcut);
+        }
+
+        private static Key GetShortcutKey(KeyEventArgs e)
+        {
+            if (e.Key == Key.System)
+                return e.SystemKey;
+            if (e.Key == Key.ImeProcessed)
+                return e.ImeProcessedKey;
+            if (e.Key == Key.DeadCharProcessed)
+                return e.DeadCharProcessedKey;
+            return e.Key;
+        }
+
+        private static bool IsInputMacroShortcut(Key key, ModifierKeys modifiers, string shortcut)
+        {
+            if (!TryParseShortcut(shortcut, out var gesture))
+            {
+                return false;
+            }
+
+            return key == gesture.Key && modifiers == gesture.Modifiers;
+        }
+
+        private static bool TryParseShortcut(string shortcut, out InputMacroShortcut gesture)
+        {
+            gesture = default(InputMacroShortcut);
+            if (string.IsNullOrWhiteSpace(shortcut))
+            {
+                return false;
+            }
+
+            var modifiers = ModifierKeys.None;
+            Key? key = null;
+            foreach (var rawPart in shortcut.Split('+'))
+            {
+                var part = rawPart.Trim();
+                if (part.Length == 0)
+                {
+                    return false;
+                }
+
+                if (string.Equals(part, "Ctrl", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(part, "Control", StringComparison.OrdinalIgnoreCase))
+                {
+                    modifiers |= ModifierKeys.Control;
+                }
+                else if (string.Equals(part, "Alt", StringComparison.OrdinalIgnoreCase))
+                {
+                    modifiers |= ModifierKeys.Alt;
+                }
+                else if (string.Equals(part, "Shift", StringComparison.OrdinalIgnoreCase))
+                {
+                    modifiers |= ModifierKeys.Shift;
+                }
+                else if (string.Equals(part, "Win", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(part, "Windows", StringComparison.OrdinalIgnoreCase))
+                {
+                    modifiers |= ModifierKeys.Windows;
+                }
+                else if (Enum.TryParse(part, ignoreCase: true, out Key parsedKey))
+                {
+                    key = parsedKey;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+
+            if (!key.HasValue || key == Key.None)
+            {
+                return false;
+            }
+
+            gesture = new InputMacroShortcut(modifiers, key.Value);
+            return true;
+        }
+
+        private static string NormalizeShortcutText(string shortcut)
+        {
+            return TryParseShortcut(shortcut, out var gesture) ? gesture.ToString() : shortcut;
+        }
+
+        private struct InputMacroShortcut
+        {
+            public InputMacroShortcut(ModifierKeys modifiers, Key key)
+            {
+                Modifiers = modifiers;
+                Key = key;
+            }
+
+            public ModifierKeys Modifiers { get; }
+
+            public Key Key { get; }
+
+            public override string ToString()
+            {
+                var parts = new System.Collections.Generic.List<string>();
+                if ((Modifiers & ModifierKeys.Control) != 0)
+                    parts.Add("Ctrl");
+                if ((Modifiers & ModifierKeys.Alt) != 0)
+                    parts.Add("Alt");
+                if ((Modifiers & ModifierKeys.Shift) != 0)
+                    parts.Add("Shift");
+                if ((Modifiers & ModifierKeys.Windows) != 0)
+                    parts.Add("Win");
+                parts.Add(Key.ToString());
+                return string.Join("+", parts);
             }
         }
 

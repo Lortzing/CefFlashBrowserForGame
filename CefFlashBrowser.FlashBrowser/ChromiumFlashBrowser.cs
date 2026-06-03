@@ -252,6 +252,8 @@ namespace CefFlashBrowser.FlashBrowser
 
         public int InputMemoryEventCount { get; private set; }
 
+        public event EventHandler<InputMemoryNativeKeyEventArgs> InputMemoryNativeKeyDown;
+
         private readonly List<HostInputMemoryEvent> _inputMemoryEvents = new List<HostInputMemoryEvent>();
         private readonly Stopwatch _inputMemoryStopwatch = new Stopwatch();
         private int _inputMemoryPlaybackVersion;
@@ -541,7 +543,32 @@ namespace CefFlashBrowser.FlashBrowser
 
         private void OnNativeMessageReceived(object sender, NativeMessageEventArgs e)
         {
+            if (HandleInputMemoryNativeKeyDown(e.Message, e.WParam, e.LParam))
+            {
+                e.Handled = true;
+                return;
+            }
+
             RecordInputMessage(e.Hwnd, e.Message, e.WParam, e.LParam);
+        }
+
+        private bool HandleInputMemoryNativeKeyDown(int msg, IntPtr wParam, IntPtr lParam)
+        {
+            if (msg != NativeMethods.WM_KEYDOWN && msg != NativeMethods.WM_SYSKEYDOWN)
+                return false;
+
+            var nativeFlags = lParam.ToInt64();
+            var isRepeat = (nativeFlags & (1L << 30)) != 0;
+            if (isRepeat)
+                return false;
+
+            var handler = InputMemoryNativeKeyDown;
+            if (handler == null)
+                return false;
+
+            var args = new InputMemoryNativeKeyEventArgs(wParam.ToInt32());
+            handler(this, args);
+            return args.Handled;
         }
 
         private void RecordInputMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam)
@@ -997,6 +1024,18 @@ namespace CefFlashBrowser.FlashBrowser
 
             [JsonProperty("metaKey")]
             public bool MetaKey { get; set; }
+        }
+
+        public sealed class InputMemoryNativeKeyEventArgs : EventArgs
+        {
+            public InputMemoryNativeKeyEventArgs(int virtualKey)
+            {
+                VirtualKey = virtualKey;
+            }
+
+            public int VirtualKey { get; }
+
+            public bool Handled { get; set; }
         }
 
         private static class NativeMethods

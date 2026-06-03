@@ -137,6 +137,31 @@
         /// </summary>
         public bool DisableBrowserContextMenu { get; set; }
 
+        /// <summary>
+        /// Shortcut for toggling input macro recording
+        /// </summary>
+        public string InputMacroRecordShortcut { get; set; }
+
+        /// <summary>
+        /// Shortcut for replaying the selected input macro
+        /// </summary>
+        public string InputMacroReplayShortcut { get; set; }
+
+        /// <summary>
+        /// Shortcut for stopping input macro playback
+        /// </summary>
+        public string InputMacroStopShortcut { get; set; }
+
+        /// <summary>
+        /// Default input macro replay count
+        /// </summary>
+        public int InputMacroReplayCount { get; set; }
+
+        /// <summary>
+        /// Whether input macro replay loops until stopped
+        /// </summary>
+        public bool InputMacroLoopUntilStopped { get; set; }
+
 
         /// <summary>
         /// Default settings
@@ -176,6 +201,11 @@
             DisableGpuAcceleration = false;
             CustomEmoticon = null;
             DisableBrowserContextMenu = false;
+            InputMacroRecordShortcut = "Ctrl+F8";
+            InputMacroReplayShortcut = "Ctrl+F9";
+            InputMacroStopShortcut = "Ctrl+F10";
+            InputMacroReplayCount = 1;
+            InputMacroLoopUntilStopped = false;
         }
 
         /// <summary>

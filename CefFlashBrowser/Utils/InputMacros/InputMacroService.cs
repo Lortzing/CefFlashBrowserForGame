@@ -1,5 +1,6 @@
 using CefFlashBrowser.Data;
 using CefFlashBrowser.Models;
+using CefFlashBrowser.Utils;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
@@ -11,6 +12,7 @@ namespace CefFlashBrowser.Utils.InputMacros
     public static class InputMacroService
     {
         public static string DirectoryPath => Path.Combine(GlobalData.DataPath, "InputMacros");
+        private static string OrderPath => Path.Combine(DirectoryPath, ".order");
 
         public static InputMacro CreateMacro(string name, string pageUrl, string eventsJson)
         {
@@ -43,7 +45,70 @@ namespace CefFlashBrowser.Utils.InputMacros
 
             var path = Path.Combine(DirectoryPath, $"{fileName}_{DateTime.Now:yyyyMMdd_HHmmss}.json");
             SafeWriteFile(path, JsonConvert.SerializeObject(macro, Formatting.Indented));
+            AppendOrder(Path.GetFileName(path));
             return path;
+        }
+
+        public static IReadOnlyList<InputMacroFile> ListSavedMacros()
+        {
+            Directory.CreateDirectory(DirectoryPath);
+            var files = Directory.GetFiles(DirectoryPath, "*.json")
+                .Select(TryLoadFile)
+                .Where(item => item != null)
+                .ToList();
+
+            var order = LoadOrder();
+            if (order.Count == 0)
+            {
+                return files.OrderByDescending(item => item.Macro.CreatedAt).ThenBy(item => item.FileName).ToArray();
+            }
+
+            var orderIndex = order
+                .Select((fileName, index) => new { fileName, index })
+                .GroupBy(item => item.fileName, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First().index, StringComparer.OrdinalIgnoreCase);
+
+            return files
+                .OrderBy(item => orderIndex.TryGetValue(item.FileName, out var index) ? index : int.MaxValue)
+                .ThenByDescending(item => item.Macro.CreatedAt)
+                .ThenBy(item => item.FileName)
+                .ToArray();
+        }
+
+        public static void SaveOrder(IEnumerable<InputMacroFile> macros)
+        {
+            Directory.CreateDirectory(DirectoryPath);
+            File.WriteAllLines(OrderPath, macros.Where(item => item != null).Select(item => item.FileName));
+        }
+
+        public static InputMacroFile Rename(InputMacroFile item, string newName)
+        {
+            if (item == null)
+            {
+                throw new ArgumentNullException(nameof(item));
+            }
+
+            if (string.IsNullOrWhiteSpace(newName))
+            {
+                throw new ArgumentException("Macro name is empty.", nameof(newName));
+            }
+
+            item.Macro.Name = newName.Trim();
+            var fileName = SanitizeFileName(item.Macro.Name);
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                fileName = CreateDefaultName();
+            }
+
+            var newPath = Path.Combine(DirectoryPath, $"{fileName}_{DateTime.Now:yyyyMMdd_HHmmss}.json");
+            SafeWriteFile(newPath, JsonConvert.SerializeObject(item.Macro, Formatting.Indented));
+            if (!string.Equals(item.Path, newPath, StringComparison.OrdinalIgnoreCase) && File.Exists(item.Path))
+            {
+                File.Delete(item.Path);
+            }
+
+            ReplaceOrderFileName(item.FileName, Path.GetFileName(newPath));
+            return new InputMacroFile(newPath, item.Macro);
         }
 
         public static InputMacro Load(string path)
@@ -60,6 +125,19 @@ namespace CefFlashBrowser.Utils.InputMacros
             }
 
             return macro;
+        }
+
+        public static string FormatDuration(double durationMs)
+        {
+            if (durationMs < 0 || double.IsNaN(durationMs) || double.IsInfinity(durationMs))
+            {
+                durationMs = 0;
+            }
+
+            var duration = TimeSpan.FromMilliseconds(durationMs);
+            return duration.TotalHours >= 1
+                ? duration.ToString(@"h\:mm\:ss")
+                : duration.ToString(@"m\:ss");
         }
 
         public static string ExportEventsJson(InputMacro macro)
@@ -97,6 +175,82 @@ namespace CefFlashBrowser.Utils.InputMacros
             {
                 File.Move(tmpPath, path);
             }
+        }
+
+        private static InputMacroFile TryLoadFile(string path)
+        {
+            try
+            {
+                return new InputMacroFile(path, Load(path));
+            }
+            catch (Exception e)
+            {
+                LogHelper.LogError($"Failed to load input macro file: {path}", e);
+                return null;
+            }
+        }
+
+        private static List<string> LoadOrder()
+        {
+            if (!File.Exists(OrderPath))
+            {
+                return new List<string>();
+            }
+
+            return File.ReadAllLines(OrderPath)
+                .Where(line => !string.IsNullOrWhiteSpace(line))
+                .Select(line => line.Trim())
+                .ToList();
+        }
+
+        private static void AppendOrder(string fileName)
+        {
+            var order = LoadOrder();
+            order.RemoveAll(item => string.Equals(item, fileName, StringComparison.OrdinalIgnoreCase));
+            order.Insert(0, fileName);
+            Directory.CreateDirectory(DirectoryPath);
+            File.WriteAllLines(OrderPath, order);
+        }
+
+        private static void ReplaceOrderFileName(string oldFileName, string newFileName)
+        {
+            var order = LoadOrder();
+            for (var i = 0; i < order.Count; i++)
+            {
+                if (string.Equals(order[i], oldFileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    order[i] = newFileName;
+                    File.WriteAllLines(OrderPath, order);
+                    return;
+                }
+            }
+
+            AppendOrder(newFileName);
+        }
+    }
+
+    public sealed class InputMacroFile
+    {
+        public InputMacroFile(string path, InputMacro macro)
+        {
+            Path = path;
+            Macro = macro;
+        }
+
+        public string Path { get; }
+
+        public InputMacro Macro { get; }
+
+        public string FileName => System.IO.Path.GetFileName(Path);
+
+        public int EventCount => Macro?.Events?.Count ?? 0;
+
+        public string DurationText => InputMacroService.FormatDuration(Macro?.DurationMs ?? 0);
+
+        public override string ToString()
+        {
+            var name = string.IsNullOrWhiteSpace(Macro?.Name) ? FileName : Macro.Name;
+            return $"{name}    {DurationText}    {EventCount}事件";
         }
     }
 }

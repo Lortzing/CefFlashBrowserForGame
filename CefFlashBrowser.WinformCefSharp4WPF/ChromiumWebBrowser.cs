@@ -557,9 +557,11 @@ namespace CefFlashBrowser.WinformCefSharp4WPF
             return hwnd == browser.Handle || Win32.IsChild(browser.Handle, hwnd);
         }
 
-        private void OnNativeMessageReceived(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam)
+        private bool OnNativeMessageReceived(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam)
         {
-            NativeMessageReceived?.Invoke(this, new NativeMessageEventArgs(hwnd, msg, wParam, lParam));
+            var args = new NativeMessageEventArgs(hwnd, msg, wParam, lParam);
+            NativeMessageReceived?.Invoke(this, args);
+            return args.Handled;
         }
 
 
@@ -852,7 +854,7 @@ namespace CefFlashBrowser.WinformCefSharp4WPF
             {
                 if (owner.IsBrowserOrChildWindow(m.HWnd))
                 {
-                    owner.OnNativeMessageReceived(m.HWnd, m.Msg, m.WParam, m.LParam);
+                    return owner.OnNativeMessageReceived(m.HWnd, m.Msg, m.WParam, m.LParam);
                 }
 
                 return false;
@@ -877,5 +879,7 @@ namespace CefFlashBrowser.WinformCefSharp4WPF
         public IntPtr WParam { get; }
 
         public IntPtr LParam { get; }
+
+        public bool Handled { get; set; }
     }
 }

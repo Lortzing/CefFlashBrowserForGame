@@ -43,6 +43,9 @@ namespace CefFlashBrowser.Models
         [JsonProperty("keyCode")]
         public int KeyCode { get; set; }
 
+        [JsonProperty("nativeKeyCode")]
+        public int NativeKeyCode { get; set; }
+
         [JsonProperty("ctrlKey")]
         public bool CtrlKey { get; set; }
 
