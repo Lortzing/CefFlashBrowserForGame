@@ -86,6 +86,7 @@ publish
 ### Platform Notes
 
 - Builds target both x86 and x64; output paths differ: `bin\Release\` (x86) vs `bin\x64\Release\` (x64)
+- C++/CLI/native projects use `$(DefaultPlatformToolset)` so Visual Studio 2022/2026-era installations can build with their installed default toolset; do not hard-code `v143` unless the repository intentionally drops newer VS compatibility.
 - Entry point is `Program.cs` (not the default `App.xaml.cs`)
 - CefSharp version 84.4.10 is pinned for Flash compatibility
 - UI controls from HandyControl library

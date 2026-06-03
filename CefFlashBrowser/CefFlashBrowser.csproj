@@ -5,6 +5,7 @@
     <TargetFramework>net462</TargetFramework>
     <UseWPF>true</UseWPF>
     <Platforms>x86;x64</Platforms>
+    <RuntimeIdentifiers>win-x86;win-x64</RuntimeIdentifiers>
     <NuGetAudit>False</NuGetAudit>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>

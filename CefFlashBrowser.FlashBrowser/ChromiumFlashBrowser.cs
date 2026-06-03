@@ -278,7 +278,7 @@ namespace CefFlashBrowser.FlashBrowser
             _inputMemoryPlaybackVersion++;
             InputMemoryEventCount = 0;
             SetInputMemoryStatus("正在录制 00:00，已记录 0 个事件");
-            ExecuteScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.start();");
+            _ = EvaluateInputMemoryScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.start();");
             _ = PollInputMemoryStatusAsync();
         }
 
@@ -287,7 +287,7 @@ namespace CefFlashBrowser.FlashBrowser
             IsInputMemoryRecording = false;
             if (CanExecuteJavascriptInMainFrame)
             {
-                ExecuteScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.stop();");
+                _ = EvaluateInputMemoryScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.stop();");
             }
             _ = RefreshInputMemoryStatusAsync();
         }
@@ -327,7 +327,7 @@ namespace CefFlashBrowser.FlashBrowser
                 speed,
                 loopCount,
                 loopIntervalMs);
-            ExecuteScriptAsync(InputMemoryBootstrapScript + script);
+            _ = EvaluateInputMemoryScriptAsync(InputMemoryBootstrapScript + script);
             _ = PollInputMemoryStatusAsync();
         }
 
@@ -337,7 +337,7 @@ namespace CefFlashBrowser.FlashBrowser
             IsInputMemoryPlaying = false;
             if (CanExecuteJavascriptInMainFrame)
             {
-                ExecuteScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.stopPlay();");
+                _ = EvaluateInputMemoryScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.stopPlay();");
             }
             SetInputMemoryStatus($"已停止，当前脚本 {InputMemoryEventCount} 个事件");
         }
@@ -350,7 +350,7 @@ namespace CefFlashBrowser.FlashBrowser
             InputMemoryEventCount = 0;
             if (CanExecuteJavascriptInMainFrame)
             {
-                ExecuteScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.clear();");
+                _ = EvaluateInputMemoryScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.clear();");
             }
             SetInputMemoryStatus("当前脚本为空");
         }
