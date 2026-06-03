@@ -81,6 +81,7 @@ publish
 - **Subprocess build lock:** `CefFlashBrowser.Subprocess.csproj` silently terminates stale `CefFlashBrowser.Subprocess.exe` processes before copying build output on Windows. This prevents MSB3021/MSB3027 file-lock failures when old CEF subprocesses are still running, while allowing normal builds when no stale subprocess exists.
 - **Input Memory:** The "键鼠记忆" feature is still the normal JS-dispatch input backend, not system-level input. `ChromiumFlashBrowser` owns the page bootstrap script and supports recording, export/import, replay stop, countdown replay, loop/speed options, and mousemove throttling. Saved macros are JSON files under the user data `InputMacros` directory via `InputMacroService`. Keep this backend safe and page-scoped; add a separate CEF host input backend before claiming Flash/game-mode fidelity.
 - **Post-build scripts:** The main `.csproj` has extensive post-build steps that extract tar.gz CEF/Flash archives and organize output directories
+- **SOL save manager:** Flash shared-object cache directories may be absent on first run or after cache cleanup. Treat a missing `GlobalData.SharedObjectsPath` as an empty save list rather than an error.
 - **Localization:** XAML resource dictionaries in `Assets/Language/`; managed by `LanguageManager`
 - **User data:** Stored in `%USERPROFILE%\Documents\CefFlashBrowser\` (settings.json, favorites.json)
 

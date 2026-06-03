@@ -55,6 +55,13 @@ namespace CefFlashBrowser.ViewModels
         {
             try
             {
+                if (!Directory.Exists(GlobalData.SharedObjectsPath))
+                {
+                    Workspaces = Array.Empty<SaveMgrWorkspaceViewModel>();
+                    CurrentWorkspace = null;
+                    return;
+                }
+
                 Workspaces = Directory.GetDirectories(GlobalData.SharedObjectsPath)
                     .Select(dir => new SaveMgrWorkspaceViewModel(dir)).ToArray();
                 CurrentWorkspace = GetMostRecentWorkspace(Workspaces);
