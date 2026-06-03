@@ -15,7 +15,10 @@ namespace CefFlashBrowser.Subprocess
             SetDllDirectory(cefPath);
             AppDomain.CurrentDomain.AssemblyResolve += ResolveCefSharpAssembly;
 
-            LoadSpeedGearBackend();
+            if (ShouldLoadSpeedGearBackend(args))
+            {
+                LoadSpeedGearBackend();
+            }
             return RunCefSelfHost(args);
         }
 
@@ -40,6 +43,65 @@ namespace CefFlashBrowser.Subprocess
                 assemblyName + ".dll");
 
             return File.Exists(path) ? Assembly.LoadFrom(path) : null;
+        }
+
+        private static bool ShouldLoadSpeedGearBackend(string[] args)
+        {
+            var processType = GetSwitchValue(args, "--type=");
+
+            if (string.Equals(processType, "gpu-process", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(processType, "utility", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (string.Equals(processType, "renderer", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(processType, "ppapi", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(processType, "plugin", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return HasSwitch(args, "--ppapi-flash-args")
+                || HasSwitch(args, "--ppapi-flash-path")
+                || HasSwitch(args, "--ppapi-flash-version");
+        }
+
+        private static string GetSwitchValue(string[] args, string prefix)
+        {
+            if (args == null)
+            {
+                return null;
+            }
+
+            foreach (var arg in args)
+            {
+                if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return arg.Substring(prefix.Length);
+                }
+            }
+
+            return null;
+        }
+
+        private static bool HasSwitch(string[] args, string switchName)
+        {
+            if (args == null)
+            {
+                return false;
+            }
+
+            foreach (var arg in args)
+            {
+                if (string.Equals(arg, switchName, StringComparison.OrdinalIgnoreCase)
+                    || arg.StartsWith(switchName + "=", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static void LoadSpeedGearBackend()
