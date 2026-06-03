@@ -25,8 +25,7 @@
   <Target Name="StopRunningCefFlashBrowserSubprocess"
           BeforeTargets="CopyFilesToOutputDirectory"
           Condition="'$(OS)' == 'Windows_NT'">
-    <Exec Command="taskkill /F /T /IM &quot;CefFlashBrowser.Subprocess.exe&quot;"
-          IgnoreExitCode="true" />
+    <Exec Command="cmd /c taskkill /F /T /IM &quot;CefFlashBrowser.Subprocess.exe&quot; &gt;nul 2&gt;nul || exit /b 0" />
   </Target>
 
 </Project>
