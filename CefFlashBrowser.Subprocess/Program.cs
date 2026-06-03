@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -17,7 +18,7 @@ namespace CefFlashBrowser.Subprocess
 
             if (ShouldLoadSpeedGearBackend(args))
             {
-                LoadSpeedGearBackend();
+                TryLoadSpeedGearBackend();
             }
             return RunCefSelfHost(args);
         }
@@ -104,7 +105,7 @@ namespace CefFlashBrowser.Subprocess
             return false;
         }
 
-        private static void LoadSpeedGearBackend()
+        private static bool TryLoadSpeedGearBackend()
         {
             var path = Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory,
@@ -112,19 +113,22 @@ namespace CefFlashBrowser.Subprocess
 
             if (!File.Exists(path))
             {
-                Environment.FailFast("SpeedGear backend DLL not found: " + path);
+                Debug.WriteLine("[SpeedGear] backend DLL not found: " + path);
+                return false;
             }
 
             var module = LoadLibrary(path);
             if (module == IntPtr.Zero)
             {
-                Environment.FailFast("Failed to load SpeedGear backend DLL: " + path);
+                Debug.WriteLine("[SpeedGear] failed to load backend DLL: " + path);
+                return false;
             }
 
             var initializeAddress = GetProcAddress(module, "CefFlashBrowserSpeedGearInitialize");
             if (initializeAddress == IntPtr.Zero)
             {
-                Environment.FailFast("SpeedGear backend initialize export not found: " + path);
+                Debug.WriteLine("[SpeedGear] initialize export not found: " + path);
+                return false;
             }
 
             var initialize = (SpeedGearInitializeDelegate)Marshal.GetDelegateForFunctionPointer(
@@ -132,8 +136,11 @@ namespace CefFlashBrowser.Subprocess
                 typeof(SpeedGearInitializeDelegate));
             if (!initialize())
             {
-                Environment.FailFast("SpeedGear backend initialization failed: " + path);
+                Debug.WriteLine("[SpeedGear] backend initialization failed: " + path);
+                return false;
             }
+
+            return true;
         }
 
         [UnmanagedFunctionPointer(CallingConvention.Winapi)]

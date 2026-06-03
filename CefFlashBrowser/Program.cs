@@ -121,11 +121,11 @@ namespace CefFlashBrowser
 
             var appSubprocessPath = Path.Combine(GlobalData.AppBaseDirectory, "CefFlashBrowser.Subprocess.exe");
             var speedGearPath = Path.Combine(GlobalData.AppBaseDirectory, "CefFlashBrowser.SpeedGear.dll");
-            if (File.Exists(appSubprocessPath) && File.Exists(speedGearPath))
+            if (IsNativeSpeedGearEnabled() && File.Exists(appSubprocessPath) && File.Exists(speedGearPath))
             {
                 settings.BrowserSubprocessPath = appSubprocessPath;
             }
-            else
+            else if (IsNativeSpeedGearEnabled())
             {
                 LogHelper.LogError(
                     $"SpeedGear backend files not found, falling back to default CefSharp subprocess. Subprocess: {appSubprocessPath}, SpeedGear: {speedGearPath}");
@@ -164,6 +164,14 @@ namespace CefFlashBrowser
 
             settings.CefCommandLineArgs["autoplay-policy"] = "no-user-gesture-required";
             Cef.Initialize(settings);
+        }
+
+        private static bool IsNativeSpeedGearEnabled()
+        {
+            var value = Environment.GetEnvironmentVariable("CEF_FLASH_BROWSER_SPEEDGEAR_ENABLE");
+            return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void OnTerminate()
