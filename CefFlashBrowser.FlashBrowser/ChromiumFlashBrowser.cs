@@ -1,11 +1,17 @@
 using CefSharp;
+using CefFlashBrowser.WinformCefSharp4WPF;
+using Newtonsoft.Json;
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Input;
 
 namespace CefFlashBrowser.FlashBrowser
 {
@@ -226,6 +232,7 @@ namespace CefFlashBrowser.FlashBrowser
         public ChromiumFlashBrowser()
         {
             SetValue(BlockedSwfsProperty, new ObservableCollection<string>());
+            NativeMessageReceived += OnNativeMessageReceived;
         }
 
 
@@ -245,9 +252,17 @@ namespace CefFlashBrowser.FlashBrowser
 
         public int InputMemoryEventCount { get; private set; }
 
-        private bool _isInputMemoryStatusPolling;
+        private readonly List<HostInputMemoryEvent> _inputMemoryEvents = new List<HostInputMemoryEvent>();
+        private readonly Stopwatch _inputMemoryStopwatch = new Stopwatch();
         private int _inputMemoryPlaybackVersion;
         private DateTime _lastInputMemoryFailureLogTime = DateTime.MinValue;
+        private int _inputMemoryPlayIndex;
+        private int _inputMemoryPlayTotal;
+        private int _inputMemoryLoopIndex;
+        private int _inputMemoryLoopTotal;
+        private int _lastInputMemoryMoveTime;
+        private int? _lastInputMemoryMoveX;
+        private int? _lastInputMemoryMoveY;
 
         public string InputMemoryStatusText
         {
@@ -268,31 +283,31 @@ namespace CefFlashBrowser.FlashBrowser
 
         public void StartInputMemoryRecording()
         {
-            if (!CanExecuteJavascriptInMainFrame)
+            if (!IsBrowserInitialized)
             {
-                SetInputMemoryStatus("页面尚未就绪，不能开始录制");
-                FeatureDiagnostics.Log("InputMemory", "start recording rejected: main frame is not ready");
+                SetInputMemoryStatus("浏览器尚未就绪，不能开始录制");
+                FeatureDiagnostics.Log("InputMemory", "start recording rejected: browser is not initialized");
                 return;
             }
 
-            FeatureDiagnostics.Log("InputMemory", "start recording requested; backend=javascript-dom-events");
+            FeatureDiagnostics.Log("InputMemory", "start recording requested; backend=cef-host-input");
             IsInputMemoryRecording = true;
             IsInputMemoryPlaying = false;
             _inputMemoryPlaybackVersion++;
+            _inputMemoryEvents.Clear();
+            _inputMemoryStopwatch.Restart();
+            _lastInputMemoryMoveTime = 0;
+            _lastInputMemoryMoveX = null;
+            _lastInputMemoryMoveY = null;
             InputMemoryEventCount = 0;
             SetInputMemoryStatus("正在录制 00:00，已记录 0 个事件");
-            _ = EvaluateInputMemoryScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.start();");
-            _ = PollInputMemoryStatusAsync();
         }
 
         public void StopInputMemoryRecording()
         {
             FeatureDiagnostics.Log("InputMemory", $"stop recording requested; count={InputMemoryEventCount}");
             IsInputMemoryRecording = false;
-            if (CanExecuteJavascriptInMainFrame)
-            {
-                _ = EvaluateInputMemoryScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.stop();");
-            }
+            _inputMemoryStopwatch.Stop();
             _ = RefreshInputMemoryStatusAsync();
         }
 
@@ -304,14 +319,17 @@ namespace CefFlashBrowser.FlashBrowser
         public async Task ReplayInputMemoryAsync(double speed = 1.0, int loopCount = 1, int loopIntervalMs = 0, int countdownSeconds = 3)
         {
             IsInputMemoryRecording = false;
-            if (!CanExecuteJavascriptInMainFrame)
+            if (!IsBrowserInitialized)
             {
-                FeatureDiagnostics.Log("InputMemory", "replay rejected: main frame is not ready");
+                FeatureDiagnostics.Log("InputMemory", "replay rejected: browser is not initialized");
                 return;
             }
 
-            await RefreshInputMemoryStatusAsync();
-            if (InputMemoryEventCount <= 0)
+            var events = _inputMemoryEvents
+                .OrderBy(item => item.Time)
+                .ToList();
+
+            if (events.Count <= 0)
             {
                 SetInputMemoryStatus("当前脚本为空，不能回放");
                 FeatureDiagnostics.Log("InputMemory", "replay rejected: event list is empty");
@@ -321,6 +339,10 @@ namespace CefFlashBrowser.FlashBrowser
             FeatureDiagnostics.Log("InputMemory", $"replay requested; count={InputMemoryEventCount} speed={speed:0.###} loopCount={loopCount} loopIntervalMs={loopIntervalMs}");
             var playbackVersion = ++_inputMemoryPlaybackVersion;
             IsInputMemoryPlaying = true;
+            _inputMemoryPlayIndex = 0;
+            _inputMemoryPlayTotal = events.Count;
+            _inputMemoryLoopIndex = 0;
+            _inputMemoryLoopTotal = loopCount;
             for (var i = countdownSeconds; i > 0; i--)
             {
                 SetInputMemoryStatus($"回放将在 {i} 秒后开始");
@@ -330,14 +352,7 @@ namespace CefFlashBrowser.FlashBrowser
             }
 
             SetInputMemoryStatus($"回放中 1/{Math.Max(loopCount, 1)}，按 Esc 停止");
-            var script = string.Format(
-                CultureInfo.InvariantCulture,
-                "\nwindow.__cefInputMemory.play({{ speed: {0}, loopCount: {1}, loopInterval: {2} }});",
-                speed,
-                loopCount,
-                loopIntervalMs);
-            _ = EvaluateInputMemoryScriptAsync(InputMemoryBootstrapScript + script);
-            _ = PollInputMemoryStatusAsync();
+            await ReplayHostInputEventsAsync(events, speed, loopCount, loopIntervalMs, playbackVersion);
         }
 
         public void StopInputMemoryPlayback()
@@ -345,10 +360,6 @@ namespace CefFlashBrowser.FlashBrowser
             FeatureDiagnostics.Log("InputMemory", $"stop playback requested; count={InputMemoryEventCount}");
             _inputMemoryPlaybackVersion++;
             IsInputMemoryPlaying = false;
-            if (CanExecuteJavascriptInMainFrame)
-            {
-                _ = EvaluateInputMemoryScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.stopPlay();");
-            }
             SetInputMemoryStatus($"已停止，当前脚本 {InputMemoryEventCount} 个事件");
         }
 
@@ -358,73 +369,35 @@ namespace CefFlashBrowser.FlashBrowser
             IsInputMemoryRecording = false;
             IsInputMemoryPlaying = false;
             _inputMemoryPlaybackVersion++;
+            _inputMemoryEvents.Clear();
             InputMemoryEventCount = 0;
-            if (CanExecuteJavascriptInMainFrame)
-            {
-                _ = EvaluateInputMemoryScriptAsync(InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.clear();");
-            }
             SetInputMemoryStatus("当前脚本为空");
         }
 
         public async Task<string> ExportInputMemoryEventsJsonAsync()
         {
-            if (!CanExecuteJavascriptInMainFrame)
-            {
-                FeatureDiagnostics.Log("InputMemory", "export requested while main frame is not ready");
-                return "[]";
-            }
-
-            var response = await EvaluateInputMemoryScriptAsync(
-                InputMemoryBootstrapScript + "\nJSON.stringify(window.__cefInputMemory.exportEvents());");
-            if (response == null)
-            {
-                FeatureDiagnostics.Log("InputMemory", "export failed: javascript response is null");
-                return "[]";
-            }
-
-            var json = response.Success ? response.Result as string : null;
             await RefreshInputMemoryStatusAsync();
-            FeatureDiagnostics.Log("InputMemory", $"export completed; success={response.Success} count={InputMemoryEventCount}");
+            var json = JsonConvert.SerializeObject(_inputMemoryEvents);
+            await RefreshInputMemoryStatusAsync();
+            FeatureDiagnostics.Log("InputMemory", $"export completed; count={InputMemoryEventCount}");
             return string.IsNullOrWhiteSpace(json) ? "[]" : json;
         }
 
         public async Task ImportInputMemoryEventsJsonAsync(string eventsJson)
         {
-            if (!CanExecuteJavascriptInMainFrame)
-            {
-                FeatureDiagnostics.Log("InputMemory", "import requested while main frame is not ready");
-                return;
-            }
-
             FeatureDiagnostics.Log("InputMemory", $"import requested; jsonLength={(eventsJson ?? string.Empty).Length}");
-            var script = InputMemoryBootstrapScript
-                + "\nwindow.__cefInputMemory.importEvents(JSON.parse("
-                + ToJavaScriptStringLiteral(eventsJson ?? "[]")
-                + "));";
-            await EvaluateInputMemoryScriptAsync(script);
+            var events = JsonConvert.DeserializeObject<List<HostInputMemoryEvent>>(eventsJson ?? "[]")
+                ?? new List<HostInputMemoryEvent>();
+
+            _inputMemoryEvents.Clear();
+            _inputMemoryEvents.AddRange(events.OrderBy(item => item.Time));
+            InputMemoryEventCount = _inputMemoryEvents.Count;
             await RefreshInputMemoryStatusAsync();
         }
 
-        public async Task RefreshInputMemoryStatusAsync()
+        public Task RefreshInputMemoryStatusAsync()
         {
-            if (!CanExecuteJavascriptInMainFrame)
-                return;
-
-            var response = await EvaluateInputMemoryScriptAsync(
-                InputMemoryBootstrapScript + "\nwindow.__cefInputMemory.state();");
-            if (response == null || !response.Success || !(response.Result is System.Collections.Generic.IDictionary<string, object> state))
-            {
-                LogInputMemoryFailure($"status refresh failed; responseNull={response == null} success={response?.Success}");
-                return;
-            }
-
-            IsInputMemoryRecording = GetBool(state, "recording");
-            IsInputMemoryPlaying = GetBool(state, "playing");
-            InputMemoryEventCount = GetInt(state, "count");
-            var playIndex = GetInt(state, "playIndex");
-            var playTotal = GetInt(state, "playTotal");
-            var loopIndex = GetInt(state, "loopIndex");
-            var loopTotal = GetInt(state, "loopTotal");
+            InputMemoryEventCount = _inputMemoryEvents.Count;
 
             if (IsInputMemoryRecording)
             {
@@ -432,8 +405,8 @@ namespace CefFlashBrowser.FlashBrowser
             }
             else if (IsInputMemoryPlaying)
             {
-                var loopText = loopTotal <= 0 ? $"{loopIndex}/∞" : $"{loopIndex}/{loopTotal}";
-                SetInputMemoryStatus($"回放中 {loopText}，事件 {playIndex}/{playTotal}，按 Esc 停止");
+                var loopText = _inputMemoryLoopTotal <= 0 ? $"{_inputMemoryLoopIndex}/∞" : $"{_inputMemoryLoopIndex}/{_inputMemoryLoopTotal}";
+                SetInputMemoryStatus($"回放中 {loopText}，事件 {_inputMemoryPlayIndex}/{_inputMemoryPlayTotal}，按 Esc 停止");
             }
             else if (InputMemoryEventCount > 0)
             {
@@ -443,41 +416,7 @@ namespace CefFlashBrowser.FlashBrowser
             {
                 SetInputMemoryStatus("当前脚本为空");
             }
-        }
-
-        private async Task PollInputMemoryStatusAsync()
-        {
-            if (_isInputMemoryStatusPolling)
-                return;
-
-            _isInputMemoryStatusPolling = true;
-            try
-            {
-                while (IsInputMemoryRecording || IsInputMemoryPlaying)
-                {
-                    await Task.Delay(500);
-                    await RefreshInputMemoryStatusAsync();
-                }
-            }
-            finally
-            {
-                _isInputMemoryStatusPolling = false;
-            }
-        }
-
-        private async Task<JavascriptResponse> EvaluateInputMemoryScriptAsync(string script)
-        {
-            try
-            {
-                var cefBrowser = GetBrowser();
-                var frame = cefBrowser?.MainFrame;
-                return frame == null ? null : await frame.EvaluateScriptAsync(script);
-            }
-            catch (Exception e)
-            {
-                LogInputMemoryFailure("failed to evaluate script", e);
-                return null;
-            }
+            return Task.FromResult(0);
         }
 
         private void LogInputMemoryFailure(string message, Exception exception = null)
@@ -490,6 +429,369 @@ namespace CefFlashBrowser.FlashBrowser
             FeatureDiagnostics.Log("InputMemory", message, exception);
         }
 
+        private async Task ReplayHostInputEventsAsync(
+            IList<HostInputMemoryEvent> events,
+            double speed,
+            int loopCount,
+            int loopIntervalMs,
+            int playbackVersion)
+        {
+            speed = Math.Max(0.1, speed);
+            loopIntervalMs = Math.Max(0, loopIntervalMs);
+            var loops = loopCount <= 0 ? int.MaxValue : loopCount;
+
+            try
+            {
+                var host = GetBrowser()?.GetHost();
+                if (host == null)
+                {
+                    SetInputMemoryStatus("浏览器输入通道不可用，不能回放");
+                    FeatureDiagnostics.Log("InputMemory", "replay failed: browser host is null");
+                    return;
+                }
+
+                host.SetFocus(true);
+                for (var loop = 0; loop < loops; loop++)
+                {
+                    _inputMemoryLoopIndex = loop + 1;
+                    double previousTime = 0;
+
+                    for (var i = 0; i < events.Count; i++)
+                    {
+                        if (playbackVersion != _inputMemoryPlaybackVersion || !IsInputMemoryPlaying)
+                            return;
+
+                        var item = events[i];
+                        var delay = Math.Max(0, (item.Time - previousTime) / speed);
+                        previousTime = Math.Max(previousTime, item.Time);
+                        if (delay > 0)
+                            await Task.Delay((int)Math.Min(int.MaxValue, delay));
+
+                        if (playbackVersion != _inputMemoryPlaybackVersion || !IsInputMemoryPlaying)
+                            return;
+
+                        _inputMemoryPlayIndex = i + 1;
+                        await Dispatcher.InvokeAsync(() => SendHostInputEvent(item));
+                        await RefreshInputMemoryStatusAsync();
+                    }
+
+                    if (loop + 1 < loops && loopIntervalMs > 0)
+                        await Task.Delay(loopIntervalMs);
+                }
+            }
+            catch (Exception e)
+            {
+                LogInputMemoryFailure("replay failed", e);
+            }
+            finally
+            {
+                if (playbackVersion == _inputMemoryPlaybackVersion)
+                {
+                    IsInputMemoryPlaying = false;
+                    _inputMemoryPlayIndex = 0;
+                    _inputMemoryLoopIndex = 0;
+                    await RefreshInputMemoryStatusAsync();
+                }
+            }
+        }
+
+        private void SendHostInputEvent(HostInputMemoryEvent item)
+        {
+            var host = GetBrowser()?.GetHost();
+            if (host == null || item == null)
+                return;
+
+            var x = ResolveInputX(item);
+            var y = ResolveInputY(item);
+            var modifiers = GetEventFlags(item);
+
+            switch ((item.Type ?? string.Empty).ToLowerInvariant())
+            {
+                case "mousemove":
+                    host.SendMouseMoveEvent(new MouseEvent(x, y, modifiers), false);
+                    break;
+                case "mousedown":
+                    host.SendMouseClickEvent(new MouseEvent(x, y, modifiers), GetMouseButton(item.Button), false, 1);
+                    break;
+                case "mouseup":
+                    host.SendMouseClickEvent(new MouseEvent(x, y, modifiers), GetMouseButton(item.Button), true, 1);
+                    break;
+                case "click":
+                    host.SendMouseClickEvent(new MouseEvent(x, y, modifiers), GetMouseButton(item.Button), false, 1);
+                    host.SendMouseClickEvent(new MouseEvent(x, y, modifiers), GetMouseButton(item.Button), true, 1);
+                    break;
+                case "dblclick":
+                    host.SendMouseClickEvent(new MouseEvent(x, y, modifiers), GetMouseButton(item.Button), false, 2);
+                    host.SendMouseClickEvent(new MouseEvent(x, y, modifiers), GetMouseButton(item.Button), true, 2);
+                    break;
+                case "wheel":
+                    host.SendMouseWheelEvent(new MouseEvent(x, y, modifiers), (int)item.DeltaX, (int)item.DeltaY);
+                    break;
+                case "keydown":
+                    host.SendKeyEvent(CreateKeyEvent(item, KeyEventType.RawKeyDown, modifiers));
+                    break;
+                case "keyup":
+                    host.SendKeyEvent(CreateKeyEvent(item, KeyEventType.KeyUp, modifiers));
+                    break;
+                case "char":
+                    host.SendKeyEvent(CreateKeyEvent(item, KeyEventType.Char, modifiers));
+                    break;
+            }
+        }
+
+        private void OnNativeMessageReceived(object sender, NativeMessageEventArgs e)
+        {
+            RecordInputMessage(e.Hwnd, e.Message, e.WParam, e.LParam);
+        }
+
+        private void RecordInputMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam)
+        {
+            if (!IsInputMemoryRecording || IsInputMemoryPlaying)
+                return;
+
+            var type = GetInputMessageType(msg);
+            if (type == null)
+                return;
+
+            var item = new HostInputMemoryEvent
+            {
+                Type = type,
+                Time = _inputMemoryStopwatch.Elapsed.TotalMilliseconds,
+                CtrlKey = (Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) != 0,
+                ShiftKey = (Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Shift) != 0,
+                AltKey = (Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Alt) != 0,
+                MetaKey = (Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Windows) != 0
+            };
+
+            if (IsMouseInputMessage(msg))
+            {
+                var x = GetSignedLowWord(lParam);
+                var y = GetSignedHighWord(lParam);
+                ConvertToBrowserClientPoint(hwnd, ref x, ref y);
+                item.X = x;
+                item.Y = y;
+                item.RatioX = ActualWidth > 0 ? x / ActualWidth : (double?)null;
+                item.RatioY = ActualHeight > 0 ? y / ActualHeight : (double?)null;
+                item.Button = GetMouseButtonCode(msg);
+                item.Buttons = GetMouseButtons();
+
+                if (msg == NativeMethods.WM_MOUSEMOVE)
+                {
+                    var now = Environment.TickCount;
+                    if (_lastInputMemoryMoveTime != 0 && now - _lastInputMemoryMoveTime < 30)
+                        return;
+
+                    if (_lastInputMemoryMoveX.HasValue && _lastInputMemoryMoveY.HasValue)
+                    {
+                        var dx = x - _lastInputMemoryMoveX.Value;
+                        var dy = y - _lastInputMemoryMoveY.Value;
+                        if (dx * dx + dy * dy < 4)
+                            return;
+                    }
+
+                    _lastInputMemoryMoveTime = now;
+                    _lastInputMemoryMoveX = x;
+                    _lastInputMemoryMoveY = y;
+                }
+            }
+            else if (msg == NativeMethods.WM_MOUSEWHEEL)
+            {
+                var x = GetSignedLowWord(lParam);
+                var y = GetSignedHighWord(lParam);
+                ConvertScreenToBrowserClientPoint(ref x, ref y);
+                item.X = x;
+                item.Y = y;
+                item.DeltaY = GetSignedHighWord(wParam);
+            }
+            else
+            {
+                item.KeyCode = wParam.ToInt32();
+                item.NativeKeyCode = unchecked((int)lParam.ToInt64());
+            }
+
+            _inputMemoryEvents.Add(item);
+            InputMemoryEventCount = _inputMemoryEvents.Count;
+            SetInputMemoryStatus($"正在录制，已记录 {InputMemoryEventCount} 个事件");
+        }
+
+        private static string GetInputMessageType(int msg)
+        {
+            switch (msg)
+            {
+                case NativeMethods.WM_MOUSEMOVE:
+                    return "mousemove";
+                case NativeMethods.WM_LBUTTONDOWN:
+                case NativeMethods.WM_RBUTTONDOWN:
+                case NativeMethods.WM_MBUTTONDOWN:
+                    return "mousedown";
+                case NativeMethods.WM_LBUTTONUP:
+                case NativeMethods.WM_RBUTTONUP:
+                case NativeMethods.WM_MBUTTONUP:
+                    return "mouseup";
+                case NativeMethods.WM_LBUTTONDBLCLK:
+                case NativeMethods.WM_RBUTTONDBLCLK:
+                case NativeMethods.WM_MBUTTONDBLCLK:
+                    return "dblclick";
+                case NativeMethods.WM_MOUSEWHEEL:
+                    return "wheel";
+                case NativeMethods.WM_KEYDOWN:
+                case NativeMethods.WM_SYSKEYDOWN:
+                    return "keydown";
+                case NativeMethods.WM_KEYUP:
+                case NativeMethods.WM_SYSKEYUP:
+                    return "keyup";
+                case NativeMethods.WM_CHAR:
+                    return "char";
+                default:
+                    return null;
+            }
+        }
+
+        private static bool IsMouseInputMessage(int msg)
+        {
+            return msg == NativeMethods.WM_MOUSEMOVE
+                || msg == NativeMethods.WM_LBUTTONDOWN
+                || msg == NativeMethods.WM_LBUTTONUP
+                || msg == NativeMethods.WM_LBUTTONDBLCLK
+                || msg == NativeMethods.WM_RBUTTONDOWN
+                || msg == NativeMethods.WM_RBUTTONUP
+                || msg == NativeMethods.WM_RBUTTONDBLCLK
+                || msg == NativeMethods.WM_MBUTTONDOWN
+                || msg == NativeMethods.WM_MBUTTONUP
+                || msg == NativeMethods.WM_MBUTTONDBLCLK;
+        }
+
+        private int ResolveInputX(HostInputMemoryEvent item)
+        {
+            if (item.X.HasValue)
+                return (int)Math.Round(item.X.Value);
+            if (item.RatioX.HasValue)
+                return (int)Math.Round(item.RatioX.Value * Math.Max(1, ActualWidth));
+            return 0;
+        }
+
+        private int ResolveInputY(HostInputMemoryEvent item)
+        {
+            if (item.Y.HasValue)
+                return (int)Math.Round(item.Y.Value);
+            if (item.RatioY.HasValue)
+                return (int)Math.Round(item.RatioY.Value * Math.Max(1, ActualHeight));
+            return 0;
+        }
+
+        private void ConvertToBrowserClientPoint(IntPtr sourceHwnd, ref int x, ref int y)
+        {
+            if (sourceHwnd == IntPtr.Zero || BrowserHandle == IntPtr.Zero || sourceHwnd == BrowserHandle)
+                return;
+
+            var point = new NativeMethods.POINT { X = x, Y = y };
+            if (NativeMethods.ClientToScreen(sourceHwnd, ref point)
+                && NativeMethods.ScreenToClient(BrowserHandle, ref point))
+            {
+                x = point.X;
+                y = point.Y;
+            }
+        }
+
+        private void ConvertScreenToBrowserClientPoint(ref int x, ref int y)
+        {
+            if (BrowserHandle == IntPtr.Zero)
+                return;
+
+            var point = new NativeMethods.POINT { X = x, Y = y };
+            if (NativeMethods.ScreenToClient(BrowserHandle, ref point))
+            {
+                x = point.X;
+                y = point.Y;
+            }
+        }
+
+        private static KeyEvent CreateKeyEvent(HostInputMemoryEvent item, KeyEventType type, CefEventFlags modifiers)
+        {
+            return new KeyEvent
+            {
+                Type = type,
+                WindowsKeyCode = item.KeyCode,
+                NativeKeyCode = item.NativeKeyCode != 0 ? item.NativeKeyCode : item.KeyCode,
+                Modifiers = modifiers,
+                IsSystemKey = item.AltKey
+            };
+        }
+
+        private static CefEventFlags GetEventFlags(HostInputMemoryEvent item)
+        {
+            var flags = CefEventFlags.None;
+            if (item.CtrlKey)
+                flags |= CefEventFlags.ControlDown;
+            if (item.ShiftKey)
+                flags |= CefEventFlags.ShiftDown;
+            if (item.AltKey)
+                flags |= CefEventFlags.AltDown;
+            if (item.MetaKey)
+                flags |= CefEventFlags.CommandDown;
+            if ((item.Buttons & 1) != 0)
+                flags |= CefEventFlags.LeftMouseButton;
+            if ((item.Buttons & 2) != 0)
+                flags |= CefEventFlags.RightMouseButton;
+            if ((item.Buttons & 4) != 0)
+                flags |= CefEventFlags.MiddleMouseButton;
+            return flags;
+        }
+
+        private static MouseButtonType GetMouseButton(int button)
+        {
+            switch (button)
+            {
+                case 1:
+                    return MouseButtonType.Middle;
+                case 2:
+                    return MouseButtonType.Right;
+                default:
+                    return MouseButtonType.Left;
+            }
+        }
+
+        private static int GetMouseButtonCode(int msg)
+        {
+            switch (msg)
+            {
+                case NativeMethods.WM_RBUTTONDOWN:
+                case NativeMethods.WM_RBUTTONUP:
+                case NativeMethods.WM_RBUTTONDBLCLK:
+                    return 2;
+                case NativeMethods.WM_MBUTTONDOWN:
+                case NativeMethods.WM_MBUTTONUP:
+                case NativeMethods.WM_MBUTTONDBLCLK:
+                    return 1;
+                default:
+                    return 0;
+            }
+        }
+
+        private static int GetMouseButtons()
+        {
+            var buttons = 0;
+            if (NativeMethods.GetKeyState(NativeMethods.VK_LBUTTON) < 0)
+                buttons |= 1;
+            if (NativeMethods.GetKeyState(NativeMethods.VK_RBUTTON) < 0)
+                buttons |= 2;
+            if (NativeMethods.GetKeyState(NativeMethods.VK_MBUTTON) < 0)
+                buttons |= 4;
+            return buttons;
+        }
+
+        private static int GetSignedLowWord(IntPtr value)
+        {
+            var raw = unchecked((int)value.ToInt64());
+            return (short)(raw & 0xffff);
+        }
+
+        private static int GetSignedHighWord(IntPtr value)
+        {
+            var raw = unchecked((int)value.ToInt64());
+            return (short)((raw >> 16) & 0xffff);
+        }
+
 
         protected override void OnFrameLoadStart(FrameLoadStartEventArgs e)
         {
@@ -500,6 +802,7 @@ namespace CefFlashBrowser.FlashBrowser
                 FeatureDiagnostics.Log("InputMemory", "main frame load start; resetting input memory state");
                 IsInputMemoryRecording = false;
                 IsInputMemoryPlaying = false;
+                _inputMemoryEvents.Clear();
                 InputMemoryEventCount = 0;
                 SetInputMemoryStatus(string.Empty);
                 BlockedSwfs.Clear();
@@ -513,8 +816,7 @@ namespace CefFlashBrowser.FlashBrowser
 
             if (e.Frame.IsMain)
             {
-                FeatureDiagnostics.Log("InputMemory", "main frame load end; injecting javascript input memory backend");
-                e.Frame.ExecuteJavaScriptAsync(InputMemoryBootstrapScript);
+                FeatureDiagnostics.Log("InputMemory", "main frame load end; host input memory backend ready");
             }
         }
 
@@ -638,6 +940,102 @@ namespace CefFlashBrowser.FlashBrowser
                     Debug.WriteLine($"[ChromiumFlashBrowser] Failed to enable plugins preference: {error}");
                 }
             });
+        }
+
+        private sealed class HostInputMemoryEvent
+        {
+            [JsonProperty("type")]
+            public string Type { get; set; }
+
+            [JsonProperty("time")]
+            public double Time { get; set; }
+
+            [JsonProperty("x")]
+            public double? X { get; set; }
+
+            [JsonProperty("y")]
+            public double? Y { get; set; }
+
+            [JsonProperty("ratioX")]
+            public double? RatioX { get; set; }
+
+            [JsonProperty("ratioY")]
+            public double? RatioY { get; set; }
+
+            [JsonProperty("button")]
+            public int Button { get; set; }
+
+            [JsonProperty("buttons")]
+            public int Buttons { get; set; }
+
+            [JsonProperty("deltaX")]
+            public double DeltaX { get; set; }
+
+            [JsonProperty("deltaY")]
+            public double DeltaY { get; set; }
+
+            [JsonProperty("key")]
+            public string Key { get; set; }
+
+            [JsonProperty("code")]
+            public string Code { get; set; }
+
+            [JsonProperty("keyCode")]
+            public int KeyCode { get; set; }
+
+            [JsonProperty("nativeKeyCode")]
+            public int NativeKeyCode { get; set; }
+
+            [JsonProperty("ctrlKey")]
+            public bool CtrlKey { get; set; }
+
+            [JsonProperty("shiftKey")]
+            public bool ShiftKey { get; set; }
+
+            [JsonProperty("altKey")]
+            public bool AltKey { get; set; }
+
+            [JsonProperty("metaKey")]
+            public bool MetaKey { get; set; }
+        }
+
+        private static class NativeMethods
+        {
+            public const int WM_KEYDOWN = 0x0100;
+            public const int WM_KEYUP = 0x0101;
+            public const int WM_CHAR = 0x0102;
+            public const int WM_SYSKEYDOWN = 0x0104;
+            public const int WM_SYSKEYUP = 0x0105;
+            public const int WM_MOUSEMOVE = 0x0200;
+            public const int WM_LBUTTONDOWN = 0x0201;
+            public const int WM_LBUTTONUP = 0x0202;
+            public const int WM_LBUTTONDBLCLK = 0x0203;
+            public const int WM_RBUTTONDOWN = 0x0204;
+            public const int WM_RBUTTONUP = 0x0205;
+            public const int WM_RBUTTONDBLCLK = 0x0206;
+            public const int WM_MBUTTONDOWN = 0x0207;
+            public const int WM_MBUTTONUP = 0x0208;
+            public const int WM_MBUTTONDBLCLK = 0x0209;
+            public const int WM_MOUSEWHEEL = 0x020A;
+            public const int VK_LBUTTON = 0x01;
+            public const int VK_RBUTTON = 0x02;
+            public const int VK_MBUTTON = 0x04;
+
+            [DllImport("user32.dll")]
+            public static extern short GetKeyState(int virtualKey);
+
+            [DllImport("user32.dll")]
+            public static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
+
+            [DllImport("user32.dll")]
+            public static extern bool ScreenToClient(IntPtr hwnd, ref POINT point);
+
+            [StructLayout(LayoutKind.Sequential)]
+            public struct POINT
+            {
+                public int X;
+                public int Y;
+            }
         }
 
     }

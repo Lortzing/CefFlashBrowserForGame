@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
+using Forms = System.Windows.Forms;
 
 namespace CefFlashBrowser.WinformCefSharp4WPF
 {
@@ -22,6 +23,8 @@ namespace CefFlashBrowser.WinformCefSharp4WPF
         /// The base browser
         /// </summary>
         private readonly CefSharp.WinForms.ChromiumWebBrowser browser;
+        private readonly BrowserMessageFilter messageFilter;
+        private bool messageFilterRegistered;
 
 
 
@@ -39,10 +42,13 @@ namespace CefFlashBrowser.WinformCefSharp4WPF
         public event EventHandler<FrameLoadEndEventArgs> FrameLoadEnd;
         public event EventHandler<LoadErrorEventArgs> LoadError;
         public event EventHandler<LoadingStateChangedEventArgs> LoadingStateChanged;
+        public event EventHandler<NativeMessageEventArgs> NativeMessageReceived;
 
         public event EventHandler<AddressChangedEventArgs> AddressChanged;
         public event EventHandler<TitleChangedEventArgs> TitleChanged;
         public event EventHandler IsBrowserInitializedChanged;
+
+        public IntPtr BrowserHandle => browser.Handle;
 
 
 
@@ -399,6 +405,9 @@ namespace CefFlashBrowser.WinformCefSharp4WPF
             browser.CreateControl();
 #pragma warning restore CS0618 // type or member is obsolete
 
+            messageFilter = new BrowserMessageFilter(this);
+            Forms.Application.AddMessageFilter(messageFilter);
+            messageFilterRegistered = true;
             Cef.AddDisposable(this);
             Focusable = true;
             FocusVisualStyle = null;
@@ -441,6 +450,7 @@ namespace CefFlashBrowser.WinformCefSharp4WPF
 
         protected override void DestroyWindowCore(HandleRef hwnd)
         {
+            RemoveMessageFilter();
             if (!browser.IsDisposed)
             {
                 browser.Dispose();
@@ -449,6 +459,7 @@ namespace CefFlashBrowser.WinformCefSharp4WPF
 
         protected override void Dispose(bool disposing)
         {
+            RemoveMessageFilter();
             if (!browser.IsDisposed)
             {
                 browser.JavascriptMessageReceived -= OnJavascriptMessageReceived;
@@ -467,6 +478,15 @@ namespace CefFlashBrowser.WinformCefSharp4WPF
 
             Cef.RemoveDisposable(this);
             base.Dispose(disposing);
+        }
+
+        private void RemoveMessageFilter()
+        {
+            if (!messageFilterRegistered)
+                return;
+
+            Forms.Application.RemoveMessageFilter(messageFilter);
+            messageFilterRegistered = false;
         }
 
         protected override bool TabIntoCore(TraversalRequest request)
@@ -527,6 +547,19 @@ namespace CefFlashBrowser.WinformCefSharp4WPF
                     }
             }
             return base.WndProc(hwnd, msg, wParam, lParam, ref handled);
+        }
+
+        private bool IsBrowserOrChildWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || browser == null || browser.IsDisposed)
+                return false;
+
+            return hwnd == browser.Handle || Win32.IsChild(browser.Handle, hwnd);
+        }
+
+        private void OnNativeMessageReceived(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam)
+        {
+            NativeMessageReceived?.Invoke(this, new NativeMessageEventArgs(hwnd, msg, wParam, lParam));
         }
 
 
@@ -805,5 +838,44 @@ namespace CefFlashBrowser.WinformCefSharp4WPF
         {
             ((IWebBrowserInternal)browser).SetCanExecuteJavascriptOnMainFrame(frameId, canExecute);
         }
+
+        private sealed class BrowserMessageFilter : Forms.IMessageFilter
+        {
+            private readonly ChromiumWebBrowser owner;
+
+            public BrowserMessageFilter(ChromiumWebBrowser owner)
+            {
+                this.owner = owner;
+            }
+
+            public bool PreFilterMessage(ref Forms.Message m)
+            {
+                if (owner.IsBrowserOrChildWindow(m.HWnd))
+                {
+                    owner.OnNativeMessageReceived(m.HWnd, m.Msg, m.WParam, m.LParam);
+                }
+
+                return false;
+            }
+        }
+    }
+
+    public sealed class NativeMessageEventArgs : EventArgs
+    {
+        public NativeMessageEventArgs(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam)
+        {
+            Hwnd = hwnd;
+            Message = message;
+            WParam = wParam;
+            LParam = lParam;
+        }
+
+        public IntPtr Hwnd { get; }
+
+        public int Message { get; }
+
+        public IntPtr WParam { get; }
+
+        public IntPtr LParam { get; }
     }
 }
