@@ -3,6 +3,7 @@
 #include <mmsystem.h>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 
 namespace
 {
@@ -24,6 +25,7 @@ namespace
     using GetMessageTimeFn = LONG (WINAPI*)();
     using TimeGetTimeFn = DWORD (WINAPI*)();
     using TimeSetEventFn = MMRESULT (WINAPI*)(UINT, UINT, LPTIMECALLBACK, DWORD_PTR, UINT);
+    using TimeKillEventFn = MMRESULT (WINAPI*)(UINT);
 
     SharedState* g_shared = nullptr;
     long long g_generation = 0;
@@ -40,8 +42,11 @@ namespace
     GetMessageTimeFn RealGetMessageTime = nullptr;
     TimeGetTimeFn RealTimeGetTime = nullptr;
     TimeSetEventFn RealTimeSetEvent = nullptr;
+    TimeKillEventFn RealTimeKillEvent = nullptr;
     HANDLE g_workerThread = nullptr;
     SRWLOCK g_stateLock = SRWLOCK_INIT;
+    bool g_debugEnabled = false;
+    DWORD g_lastDebugTick = 0;
 
     static void InitSharedState();
 
@@ -57,6 +62,35 @@ namespace
     LARGE_INTEGER g_virtualBaseQpc{};
     FILETIME g_realBaseFileTime{};
     FILETIME g_virtualBaseFileTime{};
+
+    static bool IsDebugEnabled()
+    {
+        wchar_t value[16]{};
+        const auto capacity = static_cast<DWORD>(sizeof(value) / sizeof(value[0]));
+        const auto length = GetEnvironmentVariableW(L"CEF_FLASH_BROWSER_SPEEDGEAR_DEBUG", value, capacity);
+        if (length == 0 || length >= capacity)
+            return false;
+
+        return wcscmp(value, L"1") == 0
+            || _wcsicmp(value, L"true") == 0
+            || _wcsicmp(value, L"yes") == 0;
+    }
+
+    static void DebugWrite(const wchar_t* message)
+    {
+        if (g_debugEnabled)
+            OutputDebugStringW(message);
+    }
+
+    static void DebugWriteSpeedChanged(double speed)
+    {
+        if (!g_debugEnabled)
+            return;
+
+        wchar_t message[128]{};
+        swprintf_s(message, L"[SpeedGear] speed changed: %.3fx\n", speed);
+        OutputDebugStringW(message);
+    }
 
     static ULONGLONG FileTimeToU64(FILETIME ft)
     {
@@ -111,6 +145,18 @@ namespace
     {
         const auto delta = realNow - realBase;
         return static_cast<LONGLONG>(virtualBase + static_cast<LONGLONG>(delta * speed));
+    }
+
+    static DWORD ScaleDelay(DWORD ms, double speed)
+    {
+        if (ms == 0)
+            return 0;
+
+        if (speed <= 0)
+            speed = 1.0;
+
+        const auto scaled = static_cast<DWORD>(ms / speed);
+        return scaled < 1 ? 1 : scaled;
     }
 
     static void InitializeBases()
@@ -175,6 +221,7 @@ namespace
         g_realBaseFileTime = fileTimeNow;
 
         g_speed = newSpeed;
+        DebugWriteSpeedChanged(newSpeed);
     }
 
     static void SyncSpeedLocked()
@@ -191,7 +238,7 @@ namespace
     {
         AcquireSRWLockExclusive(&g_stateLock);
         SyncSpeedLocked();
-        const auto scaled = static_cast<DWORD>(ms / g_speed);
+        const auto scaled = ScaleDelay(ms, g_speed);
         ReleaseSRWLockExclusive(&g_stateLock);
         RealSleep(scaled);
     }
@@ -200,7 +247,7 @@ namespace
     {
         AcquireSRWLockExclusive(&g_stateLock);
         SyncSpeedLocked();
-        const auto scaled = static_cast<DWORD>(ms / g_speed);
+        const auto scaled = ScaleDelay(ms, g_speed);
         ReleaseSRWLockExclusive(&g_stateLock);
         return RealSleepEx(scaled, alertable);
     }
@@ -305,11 +352,17 @@ namespace
     {
         AcquireSRWLockExclusive(&g_stateLock);
         SyncSpeedLocked();
-        auto scaled = static_cast<UINT>(delay / g_speed);
+        auto scaled = static_cast<UINT>(ScaleDelay(delay, g_speed));
         ReleaseSRWLockExclusive(&g_stateLock);
-        if (scaled < 1)
-            scaled = 1;
         return RealTimeSetEvent(scaled, resolution, proc, user, event);
+    }
+
+    MMRESULT WINAPI HookTimeKillEvent(UINT timerId)
+    {
+        if (!RealTimeKillEvent)
+            return MMSYSERR_ERROR;
+
+        return RealTimeKillEvent(timerId);
     }
 
     static void PatchImport(HMODULE module, const char* importedName, FARPROC replacement)
@@ -375,11 +428,66 @@ namespace
             PatchImport(modules[i], "GetMessageTime", reinterpret_cast<FARPROC>(HookGetMessageTime));
             PatchImport(modules[i], "timeGetTime", reinterpret_cast<FARPROC>(HookTimeGetTime));
             PatchImport(modules[i], "timeSetEvent", reinterpret_cast<FARPROC>(HookTimeSetEvent));
+            PatchImport(modules[i], "timeKillEvent", reinterpret_cast<FARPROC>(HookTimeKillEvent));
         }
+    }
+
+    static void OutputDebugStatusIfDue()
+    {
+        if (!g_debugEnabled || !RealGetTickCount)
+            return;
+
+        const auto now = RealGetTickCount();
+        if (g_lastDebugTick != 0 && now - g_lastDebugTick < 5000)
+            return;
+
+        g_lastDebugTick = now;
+
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
+
+        const auto realTick = RealGetTickCount ? RealGetTickCount() : ::GetTickCount();
+        const auto virtualTick = ScaleDwordTime(realTick, g_realBaseTick, g_virtualBaseTick, g_speed);
+        const auto tickDelta = virtualTick - g_virtualBaseTick;
+
+        DWORD timeGetTimeDelta = 0;
+        if (RealTimeGetTime)
+        {
+            const auto realTimeGetTime = RealTimeGetTime();
+            const auto virtualTimeGetTime = ScaleDwordTime(realTimeGetTime, g_realBaseTimeGetTime, g_virtualBaseTimeGetTime, g_speed);
+            timeGetTimeDelta = virtualTimeGetTime - g_virtualBaseTimeGetTime;
+        }
+
+        LONGLONG qpcDelta = 0;
+        if (RealQueryPerformanceCounter)
+        {
+            LARGE_INTEGER realQpc{};
+            if (RealQueryPerformanceCounter(&realQpc))
+            {
+                const auto virtualQpc = ScaleLongLongTime(realQpc.QuadPart, g_realBaseQpc.QuadPart, g_virtualBaseQpc.QuadPart, g_speed);
+                qpcDelta = virtualQpc - g_virtualBaseQpc.QuadPart;
+            }
+        }
+
+        const auto speed = g_speed;
+        ReleaseSRWLockExclusive(&g_stateLock);
+
+        wchar_t message[256]{};
+        swprintf_s(
+            message,
+            L"[SpeedGear] status speed=%.3fx tickDelta=%lu qpcDelta=%lld timeGetTimeDelta=%lu\n",
+            speed,
+            tickDelta,
+            qpcDelta,
+            timeGetTimeDelta);
+        OutputDebugStringW(message);
     }
 
     DWORD WINAPI SpeedGearWorker(LPVOID)
     {
+        g_debugEnabled = IsDebugEnabled();
+        DebugWrite(L"[SpeedGear] DLL loaded\n");
+
         RealSleep = reinterpret_cast<SleepFn>(Resolve(L"kernel32.dll", "Sleep"));
         RealSleepEx = reinterpret_cast<SleepExFn>(Resolve(L"kernel32.dll", "SleepEx"));
         RealGetTickCount = reinterpret_cast<GetTickCountFn>(Resolve(L"kernel32.dll", "GetTickCount"));
@@ -391,6 +499,7 @@ namespace
         RealGetMessageTime = reinterpret_cast<GetMessageTimeFn>(Resolve(L"user32.dll", "GetMessageTime"));
         RealTimeGetTime = reinterpret_cast<TimeGetTimeFn>(Resolve(L"winmm.dll", "timeGetTime"));
         RealTimeSetEvent = reinterpret_cast<TimeSetEventFn>(Resolve(L"winmm.dll", "timeSetEvent"));
+        RealTimeKillEvent = reinterpret_cast<TimeKillEventFn>(Resolve(L"winmm.dll", "timeKillEvent"));
 
         InitSharedState();
         InitializeBases();
@@ -398,6 +507,7 @@ namespace
         for (;;)
         {
             PatchAllModules();
+            OutputDebugStatusIfDue();
 
             if (RealSleep)
             {

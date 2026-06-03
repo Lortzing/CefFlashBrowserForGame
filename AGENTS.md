@@ -77,7 +77,7 @@ publish
 
 - **MVVM messaging:** Cross-component communication uses `Messenger` with tokens defined in `MessageTokens.cs`
 - **Assembly embedding:** Costura.Fody bundles managed DLLs into the main exe; native DLLs (Sol, Singleton, SpeedGear) are excluded and shipped separately
-- **SpeedGear:** Browser speed changes use `SpeedGearController` to write a shared memory factor. `CefFlashBrowser.Subprocess.exe` loads `CefFlashBrowser.SpeedGear.dll`, whose native hooks scale process timing APIs. Both files must remain physical output files and be excluded from Costura embedding. Do not reintroduce the old JavaScript timer hook for speed control.
+- **SpeedGear:** Browser speed changes use `SpeedGearController` to write a shared memory factor. `CefFlashBrowser.Subprocess.exe` loads `CefFlashBrowser.SpeedGear.dll`, whose native hooks scale process timing APIs. Both files must remain physical output files and be excluded from Costura embedding. Set `CEF_FLASH_BROWSER_SPEEDGEAR_DEBUG=1` to emit native SpeedGear debug status through `OutputDebugStringW`. Do not reintroduce the old JavaScript timer hook for speed control.
 - **Post-build scripts:** The main `.csproj` has extensive post-build steps that extract tar.gz CEF/Flash archives and organize output directories
 - **Localization:** XAML resource dictionaries in `Assets/Language/`; managed by `LanguageManager`
 - **User data:** Stored in `%USERPROFILE%\Documents\CefFlashBrowser\` (settings.json, favorites.json)
