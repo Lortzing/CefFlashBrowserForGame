@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <limits>
 
 namespace
 {
@@ -22,8 +23,13 @@ namespace
     using QueryPerformanceFrequencyFn = BOOL (WINAPI*)(LARGE_INTEGER*);
     using GetSystemTimeAsFileTimeFn = void (WINAPI*)(LPFILETIME);
     using GetSystemTimePreciseAsFileTimeFn = void (WINAPI*)(LPFILETIME);
+    using LoadLibraryAFn = HMODULE (WINAPI*)(LPCSTR);
+    using LoadLibraryExAFn = HMODULE (WINAPI*)(LPCSTR, HANDLE, DWORD);
     using LoadLibraryWFn = HMODULE (WINAPI*)(LPCWSTR);
     using LoadLibraryExWFn = HMODULE (WINAPI*)(LPCWSTR, HANDLE, DWORD);
+    using GetProcAddressFn = FARPROC (WINAPI*)(HMODULE, LPCSTR);
+    using SetWaitableTimerFn = BOOL (WINAPI*)(HANDLE, const LARGE_INTEGER*, LONG, PTIMERAPCROUTINE, LPVOID, BOOL);
+    using SetWaitableTimerExFn = BOOL (WINAPI*)(HANDLE, const LARGE_INTEGER*, LONG, PTIMERAPCROUTINE, LPVOID, PREASON_CONTEXT, ULONG);
     using SetTimerFn = UINT_PTR (WINAPI*)(HWND, UINT_PTR, UINT, TIMERPROC);
     using GetMessageTimeFn = LONG (WINAPI*)();
     using TimeGetTimeFn = DWORD (WINAPI*)();
@@ -42,8 +48,13 @@ namespace
     QueryPerformanceFrequencyFn RealQueryPerformanceFrequency = nullptr;
     GetSystemTimeAsFileTimeFn RealGetSystemTimeAsFileTime = nullptr;
     GetSystemTimePreciseAsFileTimeFn RealGetSystemTimePreciseAsFileTime = nullptr;
+    LoadLibraryAFn RealLoadLibraryA = nullptr;
+    LoadLibraryExAFn RealLoadLibraryExA = nullptr;
     LoadLibraryWFn RealLoadLibraryW = nullptr;
     LoadLibraryExWFn RealLoadLibraryExW = nullptr;
+    GetProcAddressFn RealGetProcAddress = nullptr;
+    SetWaitableTimerFn RealSetWaitableTimer = nullptr;
+    SetWaitableTimerExFn RealSetWaitableTimerEx = nullptr;
     SetTimerFn RealSetTimer = nullptr;
     GetMessageTimeFn RealGetMessageTime = nullptr;
     TimeGetTimeFn RealTimeGetTime = nullptr;
@@ -53,6 +64,12 @@ namespace
     SRWLOCK g_stateLock = SRWLOCK_INIT;
     bool g_debugEnabled = false;
     DWORD g_lastDebugTick = 0;
+    volatile LONG g_patchInProgress = 0;
+    DWORD g_lastPatchModuleCount = 0;
+    DWORD g_lastPatchEntryCount = 0;
+    DWORD g_lastPatchFailureCount = 0;
+    wchar_t g_lastPatchFailedModule[MAX_PATH]{};
+    volatile LONG g_patchRequested = 1;
 
     static void InitSharedState();
     static void PatchAllModules();
@@ -159,11 +176,105 @@ namespace
         if (ms == 0)
             return 0;
 
+        if (ms == INFINITE)
+            return INFINITE;
+
         if (speed <= 0)
             speed = 1.0;
 
-        const auto scaled = static_cast<DWORD>(ms / speed);
+        const auto scaledDouble = ms / speed;
+        if (scaledDouble >= INFINITE)
+            return INFINITE - 1;
+
+        const auto scaled = static_cast<DWORD>(scaledDouble);
         return scaled < 1 ? 1 : scaled;
+    }
+
+    static LONG ScalePeriod(LONG period, double speed)
+    {
+        if (period <= 0)
+            return 0;
+
+        if (speed <= 0)
+            speed = 1.0;
+
+        const auto scaledDouble = period / speed;
+        if (scaledDouble >= (std::numeric_limits<LONG>::max)())
+            return (std::numeric_limits<LONG>::max)();
+
+        const auto scaled = static_cast<LONG>(scaledDouble);
+        return scaled < 1 ? 1 : scaled;
+    }
+
+    static ULONGLONG SignedAbsToU64(LONGLONG value)
+    {
+        if (value >= 0)
+            return static_cast<ULONGLONG>(value);
+
+        return static_cast<ULONGLONG>(-(value + 1)) + 1;
+    }
+
+    static LONGLONG VirtualFileTimeToRealFileTime(LONGLONG virtualFileTime, double speed)
+    {
+        if (speed <= 0)
+            speed = 1.0;
+
+        const auto virtualBase = FileTimeToU64(g_virtualBaseFileTime);
+        const auto realBase = FileTimeToU64(g_realBaseFileTime);
+        const auto virtualValue = static_cast<ULONGLONG>(virtualFileTime);
+
+        if (virtualValue <= virtualBase)
+            return static_cast<LONGLONG>(realBase);
+
+        const auto virtualDelta = virtualValue - virtualBase;
+        const auto realDeltaDouble = virtualDelta / speed;
+        const auto signedMax = static_cast<ULONGLONG>((std::numeric_limits<LONGLONG>::max)());
+        if (realBase >= signedMax)
+            return (std::numeric_limits<LONGLONG>::max)();
+
+        const auto maxDelta = signedMax - realBase;
+        auto realDelta = realDeltaDouble >= static_cast<double>(maxDelta)
+            ? maxDelta
+            : static_cast<ULONGLONG>(realDeltaDouble);
+        if (realDelta > maxDelta)
+            realDelta = maxDelta;
+        return static_cast<LONGLONG>(realBase + realDelta);
+    }
+
+    static LARGE_INTEGER ScaleWaitableDueTime(const LARGE_INTEGER* dueTime, double speed)
+    {
+        LARGE_INTEGER scaled{};
+        if (!dueTime)
+            return scaled;
+
+        scaled = *dueTime;
+        if (scaled.QuadPart > 0)
+        {
+            scaled.QuadPart = VirtualFileTimeToRealFileTime(scaled.QuadPart, speed);
+            return scaled;
+        }
+
+        if (scaled.QuadPart == 0)
+            return scaled;
+
+        if (speed <= 0)
+            speed = 1.0;
+
+        const auto units = SignedAbsToU64(scaled.QuadPart);
+        const auto signedMax = static_cast<ULONGLONG>((std::numeric_limits<LONGLONG>::max)());
+        const auto scaledDouble = units / speed;
+        auto scaledUnits = scaledDouble >= static_cast<double>(signedMax)
+            ? signedMax
+            : static_cast<ULONGLONG>(scaledDouble);
+        if (scaledUnits > signedMax)
+            scaledUnits = signedMax;
+        if (scaledUnits > 0 && scaledUnits < 10000)
+            scaledUnits = 10000;
+        if (scaledUnits == 0 && units != 0)
+            scaledUnits = 10000;
+
+        scaled.QuadPart = -static_cast<LONGLONG>(scaledUnits);
+        return scaled;
     }
 
     static bool TryReadSharedSpeed(long long* generation, double* speed)
@@ -331,6 +442,41 @@ namespace
         return RealQueryPerformanceFrequency(out);
     }
 
+    BOOL WINAPI HookSetWaitableTimer(
+        HANDLE timer,
+        const LARGE_INTEGER* dueTime,
+        LONG period,
+        PTIMERAPCROUTINE completionRoutine,
+        LPVOID arg,
+        BOOL resume)
+    {
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
+        const auto scaledDueTime = ScaleWaitableDueTime(dueTime, g_speed);
+        const auto scaledPeriod = ScalePeriod(period, g_speed);
+        ReleaseSRWLockExclusive(&g_stateLock);
+
+        return RealSetWaitableTimer(timer, dueTime ? &scaledDueTime : nullptr, scaledPeriod, completionRoutine, arg, resume);
+    }
+
+    BOOL WINAPI HookSetWaitableTimerEx(
+        HANDLE timer,
+        const LARGE_INTEGER* dueTime,
+        LONG period,
+        PTIMERAPCROUTINE completionRoutine,
+        LPVOID arg,
+        PREASON_CONTEXT wakeContext,
+        ULONG tolerableDelay)
+    {
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
+        const auto scaledDueTime = ScaleWaitableDueTime(dueTime, g_speed);
+        const auto scaledPeriod = ScalePeriod(period, g_speed);
+        ReleaseSRWLockExclusive(&g_stateLock);
+
+        return RealSetWaitableTimerEx(timer, dueTime ? &scaledDueTime : nullptr, scaledPeriod, completionRoutine, arg, wakeContext, tolerableDelay);
+    }
+
     void WINAPI HookSystemTimeAsFileTime(LPFILETIME out)
     {
         if (!out)
@@ -362,10 +508,8 @@ namespace
     {
         AcquireSRWLockExclusive(&g_stateLock);
         SyncSpeedLocked();
-        auto scaled = static_cast<UINT>(elapse / g_speed);
+        auto scaled = static_cast<UINT>(ScaleDelay(elapse, g_speed));
         ReleaseSRWLockExclusive(&g_stateLock);
-        if (scaled < 1)
-            scaled = 1;
         return RealSetTimer(hwnd, id, scaled, proc);
     }
 
@@ -410,6 +554,11 @@ namespace
         return RealTimeKillEvent(timerId);
     }
 
+    static void RequestPatchAllModules()
+    {
+        InterlockedExchange(&g_patchRequested, 1);
+    }
+
     HMODULE WINAPI HookLoadLibraryW(LPCWSTR fileName)
     {
         if (!RealLoadLibraryW)
@@ -417,7 +566,18 @@ namespace
 
         const auto module = RealLoadLibraryW(fileName);
         if (module)
-            PatchAllModules();
+            RequestPatchAllModules();
+        return module;
+    }
+
+    HMODULE WINAPI HookLoadLibraryA(LPCSTR fileName)
+    {
+        if (!RealLoadLibraryA)
+            return nullptr;
+
+        const auto module = RealLoadLibraryA(fileName);
+        if (module)
+            RequestPatchAllModules();
         return module;
     }
 
@@ -428,93 +588,225 @@ namespace
 
         const auto module = RealLoadLibraryExW(fileName, file, flags);
         if (module)
-            PatchAllModules();
+            RequestPatchAllModules();
         return module;
     }
 
-    static void PatchImport(HMODULE module, const char* importedName, FARPROC replacement)
+    HMODULE WINAPI HookLoadLibraryExA(LPCSTR fileName, HANDLE file, DWORD flags)
+    {
+        if (!RealLoadLibraryExA)
+            return nullptr;
+
+        const auto module = RealLoadLibraryExA(fileName, file, flags);
+        if (module)
+            RequestPatchAllModules();
+        return module;
+    }
+
+    FARPROC WINAPI HookGetProcAddress(HMODULE module, LPCSTR procName)
+    {
+        if (!RealGetProcAddress)
+            return nullptr;
+
+        const auto resolved = RealGetProcAddress(module, procName);
+        if (!resolved || IS_INTRESOURCE(procName))
+            return resolved;
+
+        if (std::strcmp(procName, "Sleep") == 0 && resolved == reinterpret_cast<FARPROC>(RealSleep))
+            return reinterpret_cast<FARPROC>(HookSleep);
+        if (std::strcmp(procName, "SleepEx") == 0 && resolved == reinterpret_cast<FARPROC>(RealSleepEx))
+            return reinterpret_cast<FARPROC>(HookSleepEx);
+        if (std::strcmp(procName, "GetTickCount") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetTickCount))
+            return reinterpret_cast<FARPROC>(HookGetTickCount);
+        if (std::strcmp(procName, "GetTickCount64") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetTickCount64))
+            return reinterpret_cast<FARPROC>(HookGetTickCount64);
+        if (std::strcmp(procName, "QueryPerformanceCounter") == 0 && resolved == reinterpret_cast<FARPROC>(RealQueryPerformanceCounter))
+            return reinterpret_cast<FARPROC>(HookQueryPerformanceCounter);
+        if (std::strcmp(procName, "QueryPerformanceFrequency") == 0 && resolved == reinterpret_cast<FARPROC>(RealQueryPerformanceFrequency))
+            return reinterpret_cast<FARPROC>(HookQueryPerformanceFrequency);
+        if (std::strcmp(procName, "GetSystemTimeAsFileTime") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetSystemTimeAsFileTime))
+            return reinterpret_cast<FARPROC>(HookGetSystemTimeAsFileTime);
+        if (std::strcmp(procName, "GetSystemTimePreciseAsFileTime") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetSystemTimePreciseAsFileTime))
+            return reinterpret_cast<FARPROC>(HookGetSystemTimePreciseAsFileTime);
+        if (std::strcmp(procName, "SetWaitableTimer") == 0 && resolved == reinterpret_cast<FARPROC>(RealSetWaitableTimer))
+            return reinterpret_cast<FARPROC>(HookSetWaitableTimer);
+        if (std::strcmp(procName, "SetWaitableTimerEx") == 0 && resolved == reinterpret_cast<FARPROC>(RealSetWaitableTimerEx))
+            return reinterpret_cast<FARPROC>(HookSetWaitableTimerEx);
+        if (std::strcmp(procName, "LoadLibraryA") == 0 && resolved == reinterpret_cast<FARPROC>(RealLoadLibraryA))
+            return reinterpret_cast<FARPROC>(HookLoadLibraryA);
+        if (std::strcmp(procName, "LoadLibraryExA") == 0 && resolved == reinterpret_cast<FARPROC>(RealLoadLibraryExA))
+            return reinterpret_cast<FARPROC>(HookLoadLibraryExA);
+        if (std::strcmp(procName, "LoadLibraryW") == 0 && resolved == reinterpret_cast<FARPROC>(RealLoadLibraryW))
+            return reinterpret_cast<FARPROC>(HookLoadLibraryW);
+        if (std::strcmp(procName, "LoadLibraryExW") == 0 && resolved == reinterpret_cast<FARPROC>(RealLoadLibraryExW))
+            return reinterpret_cast<FARPROC>(HookLoadLibraryExW);
+        if (std::strcmp(procName, "GetProcAddress") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetProcAddress))
+            return reinterpret_cast<FARPROC>(HookGetProcAddress);
+        if (std::strcmp(procName, "SetTimer") == 0 && resolved == reinterpret_cast<FARPROC>(RealSetTimer))
+            return reinterpret_cast<FARPROC>(HookSetTimer);
+        if (std::strcmp(procName, "GetMessageTime") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetMessageTime))
+            return reinterpret_cast<FARPROC>(HookGetMessageTime);
+        if (std::strcmp(procName, "timeGetTime") == 0 && resolved == reinterpret_cast<FARPROC>(RealTimeGetTime))
+            return reinterpret_cast<FARPROC>(HookTimeGetTime);
+        if (std::strcmp(procName, "timeSetEvent") == 0 && resolved == reinterpret_cast<FARPROC>(RealTimeSetEvent))
+            return reinterpret_cast<FARPROC>(HookTimeSetEvent);
+        if (std::strcmp(procName, "timeKillEvent") == 0 && resolved == reinterpret_cast<FARPROC>(RealTimeKillEvent))
+            return reinterpret_cast<FARPROC>(HookTimeKillEvent);
+
+        return resolved;
+    }
+
+    static DWORD PatchImport(HMODULE module, const char* importedName, FARPROC expected, FARPROC replacement, bool* failed)
     {
         auto base = reinterpret_cast<std::uint8_t*>(module);
         auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
         if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE)
-            return;
+            return 0;
 
         auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
         if (!nt || nt->Signature != IMAGE_NT_SIGNATURE)
-            return;
+            return 0;
 
         auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
         if (!dir.VirtualAddress)
-            return;
+            return 0;
 
+        DWORD patched = 0;
         auto desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
         for (; desc->Name; ++desc)
         {
             auto thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + desc->FirstThunk);
             auto orig = desc->OriginalFirstThunk
                 ? reinterpret_cast<IMAGE_THUNK_DATA*>(base + desc->OriginalFirstThunk)
-                : thunk;
+                : nullptr;
 
-            for (; thunk->u1.Function && orig->u1.AddressOfData; ++thunk, ++orig)
+            for (; thunk->u1.Function; ++thunk)
             {
-                if (IMAGE_SNAP_BY_ORDINAL(orig->u1.Ordinal))
+                if (thunk->u1.Function != reinterpret_cast<ULONG_PTR>(expected))
+                {
+                    if (orig)
+                        ++orig;
                     continue;
+                }
 
-                auto byName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + orig->u1.AddressOfData);
-                if (std::strcmp(reinterpret_cast<const char*>(byName->Name), importedName) != 0)
+                if (orig)
+                {
+                    if (IMAGE_SNAP_BY_ORDINAL(orig->u1.Ordinal))
+                    {
+                        ++orig;
+                        continue;
+                    }
+
+                    auto byName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + orig->u1.AddressOfData);
+                    if (std::strcmp(reinterpret_cast<const char*>(byName->Name), importedName) != 0)
+                    {
+                        ++orig;
+                        continue;
+                    }
+                }
+
+                if (thunk->u1.Function == reinterpret_cast<ULONG_PTR>(replacement))
+                {
+                    if (orig)
+                        ++orig;
                     continue;
+                }
 
                 DWORD oldProtect = 0;
                 if (VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_READWRITE, &oldProtect))
                 {
                     thunk->u1.Function = reinterpret_cast<ULONG_PTR>(replacement);
                     VirtualProtect(&thunk->u1.Function, sizeof(void*), oldProtect, &oldProtect);
+                    patched++;
                 }
+                else if (failed)
+                {
+                    *failed = true;
+                }
+
+                if (orig)
+                    ++orig;
             }
         }
+
+        return patched;
     }
 
     static void PatchAllModules()
     {
+        if (InterlockedExchange(&g_patchInProgress, 1) != 0)
+            return;
+
         HMODULE modules[1024]{};
         DWORD needed = 0;
         if (!EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed))
+        {
+            InterlockedExchange(&g_patchInProgress, 0);
             return;
+        }
 
         const auto count = needed / sizeof(HMODULE);
+        DWORD patchedEntries = 0;
+        DWORD failureCount = 0;
+        wchar_t lastFailedModule[MAX_PATH]{};
         for (DWORD i = 0; i < count; ++i)
         {
+            bool failed = false;
             if (RealSleep)
-                PatchImport(modules[i], "Sleep", reinterpret_cast<FARPROC>(HookSleep));
+                patchedEntries += PatchImport(modules[i], "Sleep", reinterpret_cast<FARPROC>(RealSleep), reinterpret_cast<FARPROC>(HookSleep), &failed);
             if (RealSleepEx)
-                PatchImport(modules[i], "SleepEx", reinterpret_cast<FARPROC>(HookSleepEx));
+                patchedEntries += PatchImport(modules[i], "SleepEx", reinterpret_cast<FARPROC>(RealSleepEx), reinterpret_cast<FARPROC>(HookSleepEx), &failed);
             if (RealGetTickCount)
-                PatchImport(modules[i], "GetTickCount", reinterpret_cast<FARPROC>(HookGetTickCount));
+                patchedEntries += PatchImport(modules[i], "GetTickCount", reinterpret_cast<FARPROC>(RealGetTickCount), reinterpret_cast<FARPROC>(HookGetTickCount), &failed);
             if (RealGetTickCount64)
-                PatchImport(modules[i], "GetTickCount64", reinterpret_cast<FARPROC>(HookGetTickCount64));
+                patchedEntries += PatchImport(modules[i], "GetTickCount64", reinterpret_cast<FARPROC>(RealGetTickCount64), reinterpret_cast<FARPROC>(HookGetTickCount64), &failed);
             if (RealQueryPerformanceCounter)
-                PatchImport(modules[i], "QueryPerformanceCounter", reinterpret_cast<FARPROC>(HookQueryPerformanceCounter));
+                patchedEntries += PatchImport(modules[i], "QueryPerformanceCounter", reinterpret_cast<FARPROC>(RealQueryPerformanceCounter), reinterpret_cast<FARPROC>(HookQueryPerformanceCounter), &failed);
             if (RealQueryPerformanceFrequency)
-                PatchImport(modules[i], "QueryPerformanceFrequency", reinterpret_cast<FARPROC>(HookQueryPerformanceFrequency));
+                patchedEntries += PatchImport(modules[i], "QueryPerformanceFrequency", reinterpret_cast<FARPROC>(RealQueryPerformanceFrequency), reinterpret_cast<FARPROC>(HookQueryPerformanceFrequency), &failed);
             if (RealGetSystemTimeAsFileTime)
-                PatchImport(modules[i], "GetSystemTimeAsFileTime", reinterpret_cast<FARPROC>(HookGetSystemTimeAsFileTime));
+                patchedEntries += PatchImport(modules[i], "GetSystemTimeAsFileTime", reinterpret_cast<FARPROC>(RealGetSystemTimeAsFileTime), reinterpret_cast<FARPROC>(HookGetSystemTimeAsFileTime), &failed);
             if (RealGetSystemTimePreciseAsFileTime)
-                PatchImport(modules[i], "GetSystemTimePreciseAsFileTime", reinterpret_cast<FARPROC>(HookGetSystemTimePreciseAsFileTime));
+                patchedEntries += PatchImport(modules[i], "GetSystemTimePreciseAsFileTime", reinterpret_cast<FARPROC>(RealGetSystemTimePreciseAsFileTime), reinterpret_cast<FARPROC>(HookGetSystemTimePreciseAsFileTime), &failed);
+            if (RealSetWaitableTimer)
+                patchedEntries += PatchImport(modules[i], "SetWaitableTimer", reinterpret_cast<FARPROC>(RealSetWaitableTimer), reinterpret_cast<FARPROC>(HookSetWaitableTimer), &failed);
+            if (RealSetWaitableTimerEx)
+                patchedEntries += PatchImport(modules[i], "SetWaitableTimerEx", reinterpret_cast<FARPROC>(RealSetWaitableTimerEx), reinterpret_cast<FARPROC>(HookSetWaitableTimerEx), &failed);
+            if (RealLoadLibraryA)
+                patchedEntries += PatchImport(modules[i], "LoadLibraryA", reinterpret_cast<FARPROC>(RealLoadLibraryA), reinterpret_cast<FARPROC>(HookLoadLibraryA), &failed);
+            if (RealLoadLibraryExA)
+                patchedEntries += PatchImport(modules[i], "LoadLibraryExA", reinterpret_cast<FARPROC>(RealLoadLibraryExA), reinterpret_cast<FARPROC>(HookLoadLibraryExA), &failed);
             if (RealLoadLibraryW)
-                PatchImport(modules[i], "LoadLibraryW", reinterpret_cast<FARPROC>(HookLoadLibraryW));
+                patchedEntries += PatchImport(modules[i], "LoadLibraryW", reinterpret_cast<FARPROC>(RealLoadLibraryW), reinterpret_cast<FARPROC>(HookLoadLibraryW), &failed);
             if (RealLoadLibraryExW)
-                PatchImport(modules[i], "LoadLibraryExW", reinterpret_cast<FARPROC>(HookLoadLibraryExW));
+                patchedEntries += PatchImport(modules[i], "LoadLibraryExW", reinterpret_cast<FARPROC>(RealLoadLibraryExW), reinterpret_cast<FARPROC>(HookLoadLibraryExW), &failed);
+            if (RealGetProcAddress)
+                patchedEntries += PatchImport(modules[i], "GetProcAddress", reinterpret_cast<FARPROC>(RealGetProcAddress), reinterpret_cast<FARPROC>(HookGetProcAddress), &failed);
             if (RealSetTimer)
-                PatchImport(modules[i], "SetTimer", reinterpret_cast<FARPROC>(HookSetTimer));
+                patchedEntries += PatchImport(modules[i], "SetTimer", reinterpret_cast<FARPROC>(RealSetTimer), reinterpret_cast<FARPROC>(HookSetTimer), &failed);
             if (RealGetMessageTime)
-                PatchImport(modules[i], "GetMessageTime", reinterpret_cast<FARPROC>(HookGetMessageTime));
+                patchedEntries += PatchImport(modules[i], "GetMessageTime", reinterpret_cast<FARPROC>(RealGetMessageTime), reinterpret_cast<FARPROC>(HookGetMessageTime), &failed);
             if (RealTimeGetTime)
-                PatchImport(modules[i], "timeGetTime", reinterpret_cast<FARPROC>(HookTimeGetTime));
+                patchedEntries += PatchImport(modules[i], "timeGetTime", reinterpret_cast<FARPROC>(RealTimeGetTime), reinterpret_cast<FARPROC>(HookTimeGetTime), &failed);
             if (RealTimeSetEvent)
-                PatchImport(modules[i], "timeSetEvent", reinterpret_cast<FARPROC>(HookTimeSetEvent));
+                patchedEntries += PatchImport(modules[i], "timeSetEvent", reinterpret_cast<FARPROC>(RealTimeSetEvent), reinterpret_cast<FARPROC>(HookTimeSetEvent), &failed);
             if (RealTimeKillEvent)
-                PatchImport(modules[i], "timeKillEvent", reinterpret_cast<FARPROC>(HookTimeKillEvent));
+                patchedEntries += PatchImport(modules[i], "timeKillEvent", reinterpret_cast<FARPROC>(RealTimeKillEvent), reinterpret_cast<FARPROC>(HookTimeKillEvent), &failed);
+
+            if (failed)
+            {
+                failureCount++;
+                GetModuleFileNameW(modules[i], lastFailedModule, static_cast<DWORD>(sizeof(lastFailedModule) / sizeof(lastFailedModule[0])));
+            }
         }
+
+        g_lastPatchModuleCount = count;
+        g_lastPatchEntryCount = patchedEntries;
+        g_lastPatchFailureCount = failureCount;
+        if (lastFailedModule[0] != L'\0')
+            wcscpy_s(g_lastPatchFailedModule, lastFailedModule);
+
+        InterlockedExchange(&g_patchInProgress, 0);
     }
 
     static void OutputDebugStatusIfDue()
@@ -533,16 +825,20 @@ namespace
 
         const auto realTick = RealGetTickCount ? RealGetTickCount() : ::GetTickCount();
         const auto virtualTick = ScaleDwordTime(realTick, g_realBaseTick, g_virtualBaseTick, g_speed);
+        const auto realTickDelta = realTick - g_realBaseTick;
         const auto tickDelta = virtualTick - g_virtualBaseTick;
 
+        DWORD realTimeGetTimeDelta = 0;
         DWORD timeGetTimeDelta = 0;
         if (RealTimeGetTime)
         {
             const auto realTimeGetTime = RealTimeGetTime();
             const auto virtualTimeGetTime = ScaleDwordTime(realTimeGetTime, g_realBaseTimeGetTime, g_virtualBaseTimeGetTime, g_speed);
+            realTimeGetTimeDelta = realTimeGetTime - g_realBaseTimeGetTime;
             timeGetTimeDelta = virtualTimeGetTime - g_virtualBaseTimeGetTime;
         }
 
+        LONGLONG realQpcDelta = 0;
         LONGLONG qpcDelta = 0;
         if (RealQueryPerformanceCounter)
         {
@@ -550,21 +846,31 @@ namespace
             if (RealQueryPerformanceCounter(&realQpc))
             {
                 const auto virtualQpc = ScaleLongLongTime(realQpc.QuadPart, g_realBaseQpc.QuadPart, g_virtualBaseQpc.QuadPart, g_speed);
+                realQpcDelta = realQpc.QuadPart - g_realBaseQpc.QuadPart;
                 qpcDelta = virtualQpc - g_virtualBaseQpc.QuadPart;
             }
         }
 
         const auto speed = g_speed;
+        const auto generation = g_generation;
         ReleaseSRWLockExclusive(&g_stateLock);
 
-        wchar_t message[256]{};
+        wchar_t message[512]{};
         swprintf_s(
             message,
-            L"[SpeedGear] status speed=%.3fx tickDelta=%lu qpcDelta=%lld timeGetTimeDelta=%lu\n",
+            L"[SpeedGear] status speed=%.3fx generation=%lld tick=%lu/%lu qpc=%lld/%lld timeGetTime=%lu/%lu patchModules=%lu patchEntries=%lu patchFailures=%lu lastPatchFailed=%s\n",
             speed,
+            generation,
+            realTickDelta,
             tickDelta,
+            realQpcDelta,
             qpcDelta,
-            timeGetTimeDelta);
+            realTimeGetTimeDelta,
+            timeGetTimeDelta,
+            g_lastPatchModuleCount,
+            g_lastPatchEntryCount,
+            g_lastPatchFailureCount,
+            g_lastPatchFailedModule[0] ? g_lastPatchFailedModule : L"-");
         OutputDebugStringW(message);
     }
 
@@ -581,8 +887,13 @@ namespace
         RealQueryPerformanceFrequency = reinterpret_cast<QueryPerformanceFrequencyFn>(Resolve(L"kernel32.dll", "QueryPerformanceFrequency"));
         RealGetSystemTimeAsFileTime = reinterpret_cast<GetSystemTimeAsFileTimeFn>(Resolve(L"kernel32.dll", "GetSystemTimeAsFileTime"));
         RealGetSystemTimePreciseAsFileTime = reinterpret_cast<GetSystemTimePreciseAsFileTimeFn>(Resolve(L"kernel32.dll", "GetSystemTimePreciseAsFileTime"));
+        RealLoadLibraryA = reinterpret_cast<LoadLibraryAFn>(Resolve(L"kernel32.dll", "LoadLibraryA"));
+        RealLoadLibraryExA = reinterpret_cast<LoadLibraryExAFn>(Resolve(L"kernel32.dll", "LoadLibraryExA"));
         RealLoadLibraryW = reinterpret_cast<LoadLibraryWFn>(Resolve(L"kernel32.dll", "LoadLibraryW"));
         RealLoadLibraryExW = reinterpret_cast<LoadLibraryExWFn>(Resolve(L"kernel32.dll", "LoadLibraryExW"));
+        RealGetProcAddress = reinterpret_cast<GetProcAddressFn>(Resolve(L"kernel32.dll", "GetProcAddress"));
+        RealSetWaitableTimer = reinterpret_cast<SetWaitableTimerFn>(Resolve(L"kernel32.dll", "SetWaitableTimer"));
+        RealSetWaitableTimerEx = reinterpret_cast<SetWaitableTimerExFn>(Resolve(L"kernel32.dll", "SetWaitableTimerEx"));
         RealSetTimer = reinterpret_cast<SetTimerFn>(Resolve(L"user32.dll", "SetTimer"));
         RealGetMessageTime = reinterpret_cast<GetMessageTimeFn>(Resolve(L"user32.dll", "GetMessageTime"));
         RealTimeGetTime = reinterpret_cast<TimeGetTimeFn>(Resolve(L"winmm.dll", "timeGetTime"));
@@ -594,7 +905,8 @@ namespace
 
         for (;;)
         {
-            PatchAllModules();
+            if (InterlockedExchange(&g_patchRequested, 0) != 0)
+                PatchAllModules();
             OutputDebugStatusIfDue();
 
             if (RealSleep)
