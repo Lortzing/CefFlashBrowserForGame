@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cwchar>
 #include <limits>
+#include "ThirdParty/MinHook/include/MinHook.h"
 
 namespace
 {
@@ -60,6 +61,26 @@ namespace
     TimeGetTimeFn RealTimeGetTime = nullptr;
     TimeSetEventFn RealTimeSetEvent = nullptr;
     TimeKillEventFn RealTimeKillEvent = nullptr;
+    SleepFn TargetSleep = nullptr;
+    SleepExFn TargetSleepEx = nullptr;
+    GetTickCountFn TargetGetTickCount = nullptr;
+    GetTickCount64Fn TargetGetTickCount64 = nullptr;
+    QueryPerformanceCounterFn TargetQueryPerformanceCounter = nullptr;
+    QueryPerformanceFrequencyFn TargetQueryPerformanceFrequency = nullptr;
+    GetSystemTimeAsFileTimeFn TargetGetSystemTimeAsFileTime = nullptr;
+    GetSystemTimePreciseAsFileTimeFn TargetGetSystemTimePreciseAsFileTime = nullptr;
+    LoadLibraryAFn TargetLoadLibraryA = nullptr;
+    LoadLibraryExAFn TargetLoadLibraryExA = nullptr;
+    LoadLibraryWFn TargetLoadLibraryW = nullptr;
+    LoadLibraryExWFn TargetLoadLibraryExW = nullptr;
+    GetProcAddressFn TargetGetProcAddress = nullptr;
+    SetWaitableTimerFn TargetSetWaitableTimer = nullptr;
+    SetWaitableTimerExFn TargetSetWaitableTimerEx = nullptr;
+    SetTimerFn TargetSetTimer = nullptr;
+    GetMessageTimeFn TargetGetMessageTime = nullptr;
+    TimeGetTimeFn TargetTimeGetTime = nullptr;
+    TimeSetEventFn TargetTimeSetEvent = nullptr;
+    TimeKillEventFn TargetTimeKillEvent = nullptr;
     HANDLE g_workerThread = nullptr;
     SRWLOCK g_stateLock = SRWLOCK_INIT;
     bool g_debugEnabled = false;
@@ -68,13 +89,36 @@ namespace
     DWORD g_lastPatchModuleCount = 0;
     DWORD g_lastPatchEntryCount = 0;
     DWORD g_lastPatchFailureCount = 0;
+    DWORD g_inlineHookCount = 0;
+    DWORD g_inlineHookFailureCount = 0;
     wchar_t g_lastPatchFailedModule[MAX_PATH]{};
+    wchar_t g_lastInlineHookFailed[MAX_PATH]{};
     volatile LONG g_patchRequested = 1;
     volatile LONG g_initializeState = 0; // 0 none, 1 initializing, 2 initialized, -1 failed.
 
     static void InitSharedState();
     static void PatchAllModules();
     static bool InitializeSpeedGear();
+    void WINAPI HookSleep(DWORD ms);
+    DWORD WINAPI HookSleepEx(DWORD ms, BOOL alertable);
+    DWORD WINAPI HookGetTickCount();
+    ULONGLONG WINAPI HookGetTickCount64();
+    BOOL WINAPI HookQueryPerformanceCounter(LARGE_INTEGER* out);
+    BOOL WINAPI HookQueryPerformanceFrequency(LARGE_INTEGER* out);
+    void WINAPI HookGetSystemTimeAsFileTime(LPFILETIME out);
+    void WINAPI HookGetSystemTimePreciseAsFileTime(LPFILETIME out);
+    BOOL WINAPI HookSetWaitableTimer(HANDLE timer, const LARGE_INTEGER* dueTime, LONG period, PTIMERAPCROUTINE completionRoutine, LPVOID arg, BOOL resume);
+    BOOL WINAPI HookSetWaitableTimerEx(HANDLE timer, const LARGE_INTEGER* dueTime, LONG period, PTIMERAPCROUTINE completionRoutine, LPVOID arg, PREASON_CONTEXT reason, ULONG tolerableDelay);
+    HMODULE WINAPI HookLoadLibraryA(LPCSTR fileName);
+    HMODULE WINAPI HookLoadLibraryExA(LPCSTR fileName, HANDLE file, DWORD flags);
+    HMODULE WINAPI HookLoadLibraryW(LPCWSTR fileName);
+    HMODULE WINAPI HookLoadLibraryExW(LPCWSTR fileName, HANDLE file, DWORD flags);
+    FARPROC WINAPI HookGetProcAddress(HMODULE module, LPCSTR procName);
+    UINT_PTR WINAPI HookSetTimer(HWND hwnd, UINT_PTR timerId, UINT elapse, TIMERPROC timerProc);
+    LONG WINAPI HookGetMessageTime();
+    DWORD WINAPI HookTimeGetTime();
+    MMRESULT WINAPI HookTimeSetEvent(UINT delay, UINT resolution, LPTIMECALLBACK callback, DWORD_PTR user, UINT event);
+    MMRESULT WINAPI HookTimeKillEvent(UINT id);
 
     DWORD g_realBaseTick = 0;
     DWORD g_virtualBaseTick = 0;
@@ -118,6 +162,16 @@ namespace
         OutputDebugStringW(message);
     }
 
+    static void DebugWriteInlineHookFailure(const wchar_t* name, MH_STATUS status)
+    {
+        if (!g_debugEnabled)
+            return;
+
+        wchar_t message[256]{};
+        swprintf_s(message, L"[SpeedGear] inline hook failed: %s status=%d\n", name, static_cast<int>(status));
+        OutputDebugStringW(message);
+    }
+
     static ULONGLONG FileTimeToU64(FILETIME ft)
     {
         return (static_cast<ULONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
@@ -137,6 +191,73 @@ namespace
         if (!module)
             module = LoadLibraryW(moduleName);
         return module ? GetProcAddress(module, functionName) : nullptr;
+    }
+
+    template <typename T>
+    static void InstallInlineHook(const wchar_t* name, T target, T hook, T* real)
+    {
+        if (!target)
+            return;
+
+        auto status = MH_CreateHook(
+            reinterpret_cast<LPVOID>(target),
+            reinterpret_cast<LPVOID>(hook),
+            reinterpret_cast<LPVOID*>(real));
+        if (status != MH_OK && status != MH_ERROR_ALREADY_CREATED)
+        {
+            ++g_inlineHookFailureCount;
+            wcscpy_s(g_lastInlineHookFailed, name);
+            DebugWriteInlineHookFailure(name, status);
+            return;
+        }
+
+        status = MH_EnableHook(reinterpret_cast<LPVOID>(target));
+        if (status == MH_OK || status == MH_ERROR_ENABLED)
+        {
+            ++g_inlineHookCount;
+            return;
+        }
+
+        ++g_inlineHookFailureCount;
+        wcscpy_s(g_lastInlineHookFailed, name);
+        DebugWriteInlineHookFailure(name, status);
+    }
+
+    static void InstallInlineHooks()
+    {
+        g_inlineHookCount = 0;
+        g_inlineHookFailureCount = 0;
+        g_lastInlineHookFailed[0] = L'\0';
+
+        const auto initStatus = MH_Initialize();
+        if (initStatus != MH_OK && initStatus != MH_ERROR_ALREADY_INITIALIZED)
+        {
+            ++g_inlineHookFailureCount;
+            wcscpy_s(g_lastInlineHookFailed, L"MH_Initialize");
+            DebugWriteInlineHookFailure(L"MH_Initialize", initStatus);
+            return;
+        }
+
+        InstallInlineHook(L"Sleep", TargetSleep, HookSleep, &RealSleep);
+        InstallInlineHook(L"SleepEx", TargetSleepEx, HookSleepEx, &RealSleepEx);
+        InstallInlineHook(L"GetTickCount", TargetGetTickCount, HookGetTickCount, &RealGetTickCount);
+        InstallInlineHook(L"GetTickCount64", TargetGetTickCount64, HookGetTickCount64, &RealGetTickCount64);
+        InstallInlineHook(L"QueryPerformanceCounter", TargetQueryPerformanceCounter, HookQueryPerformanceCounter, &RealQueryPerformanceCounter);
+        InstallInlineHook(L"QueryPerformanceFrequency", TargetQueryPerformanceFrequency, HookQueryPerformanceFrequency, &RealQueryPerformanceFrequency);
+        InstallInlineHook(L"GetSystemTimeAsFileTime", TargetGetSystemTimeAsFileTime, HookGetSystemTimeAsFileTime, &RealGetSystemTimeAsFileTime);
+        InstallInlineHook(L"GetSystemTimePreciseAsFileTime", TargetGetSystemTimePreciseAsFileTime, HookGetSystemTimePreciseAsFileTime, &RealGetSystemTimePreciseAsFileTime);
+        InstallInlineHook(L"SetWaitableTimer", TargetSetWaitableTimer, HookSetWaitableTimer, &RealSetWaitableTimer);
+        InstallInlineHook(L"SetWaitableTimerEx", TargetSetWaitableTimerEx, HookSetWaitableTimerEx, &RealSetWaitableTimerEx);
+        InstallInlineHook(L"LoadLibraryA", TargetLoadLibraryA, HookLoadLibraryA, &RealLoadLibraryA);
+        InstallInlineHook(L"LoadLibraryExA", TargetLoadLibraryExA, HookLoadLibraryExA, &RealLoadLibraryExA);
+        InstallInlineHook(L"LoadLibraryW", TargetLoadLibraryW, HookLoadLibraryW, &RealLoadLibraryW);
+        InstallInlineHook(L"LoadLibraryExW", TargetLoadLibraryExW, HookLoadLibraryExW, &RealLoadLibraryExW);
+        InstallInlineHook(L"GetProcAddress", TargetGetProcAddress, HookGetProcAddress, &RealGetProcAddress);
+        InstallInlineHook(L"SetTimer", TargetSetTimer, HookSetTimer, &RealSetTimer);
+        InstallInlineHook(L"GetMessageTime", TargetGetMessageTime, HookGetMessageTime, &RealGetMessageTime);
+        InstallInlineHook(L"timeGetTime", TargetTimeGetTime, HookTimeGetTime, &RealTimeGetTime);
+        InstallInlineHook(L"timeSetEvent", TargetTimeSetEvent, HookTimeSetEvent, &RealTimeSetEvent);
+        InstallInlineHook(L"timeKillEvent", TargetTimeKillEvent, HookTimeKillEvent, &RealTimeKillEvent);
     }
 
     static void GetRealFileTime(LPFILETIME out)
@@ -614,45 +735,45 @@ namespace
         if (!resolved || IS_INTRESOURCE(procName))
             return resolved;
 
-        if (std::strcmp(procName, "Sleep") == 0 && resolved == reinterpret_cast<FARPROC>(RealSleep))
+        if (std::strcmp(procName, "Sleep") == 0 && resolved == reinterpret_cast<FARPROC>(TargetSleep))
             return reinterpret_cast<FARPROC>(HookSleep);
-        if (std::strcmp(procName, "SleepEx") == 0 && resolved == reinterpret_cast<FARPROC>(RealSleepEx))
+        if (std::strcmp(procName, "SleepEx") == 0 && resolved == reinterpret_cast<FARPROC>(TargetSleepEx))
             return reinterpret_cast<FARPROC>(HookSleepEx);
-        if (std::strcmp(procName, "GetTickCount") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetTickCount))
+        if (std::strcmp(procName, "GetTickCount") == 0 && resolved == reinterpret_cast<FARPROC>(TargetGetTickCount))
             return reinterpret_cast<FARPROC>(HookGetTickCount);
-        if (std::strcmp(procName, "GetTickCount64") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetTickCount64))
+        if (std::strcmp(procName, "GetTickCount64") == 0 && resolved == reinterpret_cast<FARPROC>(TargetGetTickCount64))
             return reinterpret_cast<FARPROC>(HookGetTickCount64);
-        if (std::strcmp(procName, "QueryPerformanceCounter") == 0 && resolved == reinterpret_cast<FARPROC>(RealQueryPerformanceCounter))
+        if (std::strcmp(procName, "QueryPerformanceCounter") == 0 && resolved == reinterpret_cast<FARPROC>(TargetQueryPerformanceCounter))
             return reinterpret_cast<FARPROC>(HookQueryPerformanceCounter);
-        if (std::strcmp(procName, "QueryPerformanceFrequency") == 0 && resolved == reinterpret_cast<FARPROC>(RealQueryPerformanceFrequency))
+        if (std::strcmp(procName, "QueryPerformanceFrequency") == 0 && resolved == reinterpret_cast<FARPROC>(TargetQueryPerformanceFrequency))
             return reinterpret_cast<FARPROC>(HookQueryPerformanceFrequency);
-        if (std::strcmp(procName, "GetSystemTimeAsFileTime") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetSystemTimeAsFileTime))
+        if (std::strcmp(procName, "GetSystemTimeAsFileTime") == 0 && resolved == reinterpret_cast<FARPROC>(TargetGetSystemTimeAsFileTime))
             return reinterpret_cast<FARPROC>(HookGetSystemTimeAsFileTime);
-        if (std::strcmp(procName, "GetSystemTimePreciseAsFileTime") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetSystemTimePreciseAsFileTime))
+        if (std::strcmp(procName, "GetSystemTimePreciseAsFileTime") == 0 && resolved == reinterpret_cast<FARPROC>(TargetGetSystemTimePreciseAsFileTime))
             return reinterpret_cast<FARPROC>(HookGetSystemTimePreciseAsFileTime);
-        if (std::strcmp(procName, "SetWaitableTimer") == 0 && resolved == reinterpret_cast<FARPROC>(RealSetWaitableTimer))
+        if (std::strcmp(procName, "SetWaitableTimer") == 0 && resolved == reinterpret_cast<FARPROC>(TargetSetWaitableTimer))
             return reinterpret_cast<FARPROC>(HookSetWaitableTimer);
-        if (std::strcmp(procName, "SetWaitableTimerEx") == 0 && resolved == reinterpret_cast<FARPROC>(RealSetWaitableTimerEx))
+        if (std::strcmp(procName, "SetWaitableTimerEx") == 0 && resolved == reinterpret_cast<FARPROC>(TargetSetWaitableTimerEx))
             return reinterpret_cast<FARPROC>(HookSetWaitableTimerEx);
-        if (std::strcmp(procName, "LoadLibraryA") == 0 && resolved == reinterpret_cast<FARPROC>(RealLoadLibraryA))
+        if (std::strcmp(procName, "LoadLibraryA") == 0 && resolved == reinterpret_cast<FARPROC>(TargetLoadLibraryA))
             return reinterpret_cast<FARPROC>(HookLoadLibraryA);
-        if (std::strcmp(procName, "LoadLibraryExA") == 0 && resolved == reinterpret_cast<FARPROC>(RealLoadLibraryExA))
+        if (std::strcmp(procName, "LoadLibraryExA") == 0 && resolved == reinterpret_cast<FARPROC>(TargetLoadLibraryExA))
             return reinterpret_cast<FARPROC>(HookLoadLibraryExA);
-        if (std::strcmp(procName, "LoadLibraryW") == 0 && resolved == reinterpret_cast<FARPROC>(RealLoadLibraryW))
+        if (std::strcmp(procName, "LoadLibraryW") == 0 && resolved == reinterpret_cast<FARPROC>(TargetLoadLibraryW))
             return reinterpret_cast<FARPROC>(HookLoadLibraryW);
-        if (std::strcmp(procName, "LoadLibraryExW") == 0 && resolved == reinterpret_cast<FARPROC>(RealLoadLibraryExW))
+        if (std::strcmp(procName, "LoadLibraryExW") == 0 && resolved == reinterpret_cast<FARPROC>(TargetLoadLibraryExW))
             return reinterpret_cast<FARPROC>(HookLoadLibraryExW);
-        if (std::strcmp(procName, "GetProcAddress") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetProcAddress))
+        if (std::strcmp(procName, "GetProcAddress") == 0 && resolved == reinterpret_cast<FARPROC>(TargetGetProcAddress))
             return reinterpret_cast<FARPROC>(HookGetProcAddress);
-        if (std::strcmp(procName, "SetTimer") == 0 && resolved == reinterpret_cast<FARPROC>(RealSetTimer))
+        if (std::strcmp(procName, "SetTimer") == 0 && resolved == reinterpret_cast<FARPROC>(TargetSetTimer))
             return reinterpret_cast<FARPROC>(HookSetTimer);
-        if (std::strcmp(procName, "GetMessageTime") == 0 && resolved == reinterpret_cast<FARPROC>(RealGetMessageTime))
+        if (std::strcmp(procName, "GetMessageTime") == 0 && resolved == reinterpret_cast<FARPROC>(TargetGetMessageTime))
             return reinterpret_cast<FARPROC>(HookGetMessageTime);
-        if (std::strcmp(procName, "timeGetTime") == 0 && resolved == reinterpret_cast<FARPROC>(RealTimeGetTime))
+        if (std::strcmp(procName, "timeGetTime") == 0 && resolved == reinterpret_cast<FARPROC>(TargetTimeGetTime))
             return reinterpret_cast<FARPROC>(HookTimeGetTime);
-        if (std::strcmp(procName, "timeSetEvent") == 0 && resolved == reinterpret_cast<FARPROC>(RealTimeSetEvent))
+        if (std::strcmp(procName, "timeSetEvent") == 0 && resolved == reinterpret_cast<FARPROC>(TargetTimeSetEvent))
             return reinterpret_cast<FARPROC>(HookTimeSetEvent);
-        if (std::strcmp(procName, "timeKillEvent") == 0 && resolved == reinterpret_cast<FARPROC>(RealTimeKillEvent))
+        if (std::strcmp(procName, "timeKillEvent") == 0 && resolved == reinterpret_cast<FARPROC>(TargetTimeKillEvent))
             return reinterpret_cast<FARPROC>(HookTimeKillEvent);
 
         return resolved;
@@ -754,46 +875,46 @@ namespace
         for (DWORD i = 0; i < count; ++i)
         {
             bool failed = false;
-            if (RealSleep)
-                patchedEntries += PatchImport(modules[i], "Sleep", reinterpret_cast<FARPROC>(RealSleep), reinterpret_cast<FARPROC>(HookSleep), &failed);
-            if (RealSleepEx)
-                patchedEntries += PatchImport(modules[i], "SleepEx", reinterpret_cast<FARPROC>(RealSleepEx), reinterpret_cast<FARPROC>(HookSleepEx), &failed);
-            if (RealGetTickCount)
-                patchedEntries += PatchImport(modules[i], "GetTickCount", reinterpret_cast<FARPROC>(RealGetTickCount), reinterpret_cast<FARPROC>(HookGetTickCount), &failed);
-            if (RealGetTickCount64)
-                patchedEntries += PatchImport(modules[i], "GetTickCount64", reinterpret_cast<FARPROC>(RealGetTickCount64), reinterpret_cast<FARPROC>(HookGetTickCount64), &failed);
-            if (RealQueryPerformanceCounter)
-                patchedEntries += PatchImport(modules[i], "QueryPerformanceCounter", reinterpret_cast<FARPROC>(RealQueryPerformanceCounter), reinterpret_cast<FARPROC>(HookQueryPerformanceCounter), &failed);
-            if (RealQueryPerformanceFrequency)
-                patchedEntries += PatchImport(modules[i], "QueryPerformanceFrequency", reinterpret_cast<FARPROC>(RealQueryPerformanceFrequency), reinterpret_cast<FARPROC>(HookQueryPerformanceFrequency), &failed);
-            if (RealGetSystemTimeAsFileTime)
-                patchedEntries += PatchImport(modules[i], "GetSystemTimeAsFileTime", reinterpret_cast<FARPROC>(RealGetSystemTimeAsFileTime), reinterpret_cast<FARPROC>(HookGetSystemTimeAsFileTime), &failed);
-            if (RealGetSystemTimePreciseAsFileTime)
-                patchedEntries += PatchImport(modules[i], "GetSystemTimePreciseAsFileTime", reinterpret_cast<FARPROC>(RealGetSystemTimePreciseAsFileTime), reinterpret_cast<FARPROC>(HookGetSystemTimePreciseAsFileTime), &failed);
-            if (RealSetWaitableTimer)
-                patchedEntries += PatchImport(modules[i], "SetWaitableTimer", reinterpret_cast<FARPROC>(RealSetWaitableTimer), reinterpret_cast<FARPROC>(HookSetWaitableTimer), &failed);
-            if (RealSetWaitableTimerEx)
-                patchedEntries += PatchImport(modules[i], "SetWaitableTimerEx", reinterpret_cast<FARPROC>(RealSetWaitableTimerEx), reinterpret_cast<FARPROC>(HookSetWaitableTimerEx), &failed);
-            if (RealLoadLibraryA)
-                patchedEntries += PatchImport(modules[i], "LoadLibraryA", reinterpret_cast<FARPROC>(RealLoadLibraryA), reinterpret_cast<FARPROC>(HookLoadLibraryA), &failed);
-            if (RealLoadLibraryExA)
-                patchedEntries += PatchImport(modules[i], "LoadLibraryExA", reinterpret_cast<FARPROC>(RealLoadLibraryExA), reinterpret_cast<FARPROC>(HookLoadLibraryExA), &failed);
-            if (RealLoadLibraryW)
-                patchedEntries += PatchImport(modules[i], "LoadLibraryW", reinterpret_cast<FARPROC>(RealLoadLibraryW), reinterpret_cast<FARPROC>(HookLoadLibraryW), &failed);
-            if (RealLoadLibraryExW)
-                patchedEntries += PatchImport(modules[i], "LoadLibraryExW", reinterpret_cast<FARPROC>(RealLoadLibraryExW), reinterpret_cast<FARPROC>(HookLoadLibraryExW), &failed);
-            if (RealGetProcAddress)
-                patchedEntries += PatchImport(modules[i], "GetProcAddress", reinterpret_cast<FARPROC>(RealGetProcAddress), reinterpret_cast<FARPROC>(HookGetProcAddress), &failed);
-            if (RealSetTimer)
-                patchedEntries += PatchImport(modules[i], "SetTimer", reinterpret_cast<FARPROC>(RealSetTimer), reinterpret_cast<FARPROC>(HookSetTimer), &failed);
-            if (RealGetMessageTime)
-                patchedEntries += PatchImport(modules[i], "GetMessageTime", reinterpret_cast<FARPROC>(RealGetMessageTime), reinterpret_cast<FARPROC>(HookGetMessageTime), &failed);
-            if (RealTimeGetTime)
-                patchedEntries += PatchImport(modules[i], "timeGetTime", reinterpret_cast<FARPROC>(RealTimeGetTime), reinterpret_cast<FARPROC>(HookTimeGetTime), &failed);
-            if (RealTimeSetEvent)
-                patchedEntries += PatchImport(modules[i], "timeSetEvent", reinterpret_cast<FARPROC>(RealTimeSetEvent), reinterpret_cast<FARPROC>(HookTimeSetEvent), &failed);
-            if (RealTimeKillEvent)
-                patchedEntries += PatchImport(modules[i], "timeKillEvent", reinterpret_cast<FARPROC>(RealTimeKillEvent), reinterpret_cast<FARPROC>(HookTimeKillEvent), &failed);
+            if (TargetSleep)
+                patchedEntries += PatchImport(modules[i], "Sleep", reinterpret_cast<FARPROC>(TargetSleep), reinterpret_cast<FARPROC>(HookSleep), &failed);
+            if (TargetSleepEx)
+                patchedEntries += PatchImport(modules[i], "SleepEx", reinterpret_cast<FARPROC>(TargetSleepEx), reinterpret_cast<FARPROC>(HookSleepEx), &failed);
+            if (TargetGetTickCount)
+                patchedEntries += PatchImport(modules[i], "GetTickCount", reinterpret_cast<FARPROC>(TargetGetTickCount), reinterpret_cast<FARPROC>(HookGetTickCount), &failed);
+            if (TargetGetTickCount64)
+                patchedEntries += PatchImport(modules[i], "GetTickCount64", reinterpret_cast<FARPROC>(TargetGetTickCount64), reinterpret_cast<FARPROC>(HookGetTickCount64), &failed);
+            if (TargetQueryPerformanceCounter)
+                patchedEntries += PatchImport(modules[i], "QueryPerformanceCounter", reinterpret_cast<FARPROC>(TargetQueryPerformanceCounter), reinterpret_cast<FARPROC>(HookQueryPerformanceCounter), &failed);
+            if (TargetQueryPerformanceFrequency)
+                patchedEntries += PatchImport(modules[i], "QueryPerformanceFrequency", reinterpret_cast<FARPROC>(TargetQueryPerformanceFrequency), reinterpret_cast<FARPROC>(HookQueryPerformanceFrequency), &failed);
+            if (TargetGetSystemTimeAsFileTime)
+                patchedEntries += PatchImport(modules[i], "GetSystemTimeAsFileTime", reinterpret_cast<FARPROC>(TargetGetSystemTimeAsFileTime), reinterpret_cast<FARPROC>(HookGetSystemTimeAsFileTime), &failed);
+            if (TargetGetSystemTimePreciseAsFileTime)
+                patchedEntries += PatchImport(modules[i], "GetSystemTimePreciseAsFileTime", reinterpret_cast<FARPROC>(TargetGetSystemTimePreciseAsFileTime), reinterpret_cast<FARPROC>(HookGetSystemTimePreciseAsFileTime), &failed);
+            if (TargetSetWaitableTimer)
+                patchedEntries += PatchImport(modules[i], "SetWaitableTimer", reinterpret_cast<FARPROC>(TargetSetWaitableTimer), reinterpret_cast<FARPROC>(HookSetWaitableTimer), &failed);
+            if (TargetSetWaitableTimerEx)
+                patchedEntries += PatchImport(modules[i], "SetWaitableTimerEx", reinterpret_cast<FARPROC>(TargetSetWaitableTimerEx), reinterpret_cast<FARPROC>(HookSetWaitableTimerEx), &failed);
+            if (TargetLoadLibraryA)
+                patchedEntries += PatchImport(modules[i], "LoadLibraryA", reinterpret_cast<FARPROC>(TargetLoadLibraryA), reinterpret_cast<FARPROC>(HookLoadLibraryA), &failed);
+            if (TargetLoadLibraryExA)
+                patchedEntries += PatchImport(modules[i], "LoadLibraryExA", reinterpret_cast<FARPROC>(TargetLoadLibraryExA), reinterpret_cast<FARPROC>(HookLoadLibraryExA), &failed);
+            if (TargetLoadLibraryW)
+                patchedEntries += PatchImport(modules[i], "LoadLibraryW", reinterpret_cast<FARPROC>(TargetLoadLibraryW), reinterpret_cast<FARPROC>(HookLoadLibraryW), &failed);
+            if (TargetLoadLibraryExW)
+                patchedEntries += PatchImport(modules[i], "LoadLibraryExW", reinterpret_cast<FARPROC>(TargetLoadLibraryExW), reinterpret_cast<FARPROC>(HookLoadLibraryExW), &failed);
+            if (TargetGetProcAddress)
+                patchedEntries += PatchImport(modules[i], "GetProcAddress", reinterpret_cast<FARPROC>(TargetGetProcAddress), reinterpret_cast<FARPROC>(HookGetProcAddress), &failed);
+            if (TargetSetTimer)
+                patchedEntries += PatchImport(modules[i], "SetTimer", reinterpret_cast<FARPROC>(TargetSetTimer), reinterpret_cast<FARPROC>(HookSetTimer), &failed);
+            if (TargetGetMessageTime)
+                patchedEntries += PatchImport(modules[i], "GetMessageTime", reinterpret_cast<FARPROC>(TargetGetMessageTime), reinterpret_cast<FARPROC>(HookGetMessageTime), &failed);
+            if (TargetTimeGetTime)
+                patchedEntries += PatchImport(modules[i], "timeGetTime", reinterpret_cast<FARPROC>(TargetTimeGetTime), reinterpret_cast<FARPROC>(HookTimeGetTime), &failed);
+            if (TargetTimeSetEvent)
+                patchedEntries += PatchImport(modules[i], "timeSetEvent", reinterpret_cast<FARPROC>(TargetTimeSetEvent), reinterpret_cast<FARPROC>(HookTimeSetEvent), &failed);
+            if (TargetTimeKillEvent)
+                patchedEntries += PatchImport(modules[i], "timeKillEvent", reinterpret_cast<FARPROC>(TargetTimeKillEvent), reinterpret_cast<FARPROC>(HookTimeKillEvent), &failed);
 
             if (failed)
             {
@@ -857,10 +978,10 @@ namespace
         const auto generation = g_generation;
         ReleaseSRWLockExclusive(&g_stateLock);
 
-        wchar_t message[512]{};
+        wchar_t message[768]{};
         swprintf_s(
             message,
-            L"[SpeedGear] status speed=%.3fx generation=%lld tick=%lu/%lu qpc=%lld/%lld timeGetTime=%lu/%lu patchModules=%lu patchEntries=%lu patchFailures=%lu lastPatchFailed=%s\n",
+            L"[SpeedGear] status speed=%.3fx generation=%lld tick=%lu/%lu qpc=%lld/%lld timeGetTime=%lu/%lu inlineHooks=%lu inlineFailures=%lu lastInlineFailed=%s patchModules=%lu patchEntries=%lu patchFailures=%lu lastPatchFailed=%s\n",
             speed,
             generation,
             realTickDelta,
@@ -869,6 +990,9 @@ namespace
             qpcDelta,
             realTimeGetTimeDelta,
             timeGetTimeDelta,
+            g_inlineHookCount,
+            g_inlineHookFailureCount,
+            g_lastInlineHookFailed[0] ? g_lastInlineHookFailed : L"-",
             g_lastPatchModuleCount,
             g_lastPatchEntryCount,
             g_lastPatchFailureCount,
@@ -881,41 +1005,62 @@ namespace
         g_debugEnabled = IsDebugEnabled();
         DebugWrite(L"[SpeedGear] DLL loaded\n");
 
-        RealSleep = reinterpret_cast<SleepFn>(Resolve(L"kernel32.dll", "Sleep"));
-        RealSleepEx = reinterpret_cast<SleepExFn>(Resolve(L"kernel32.dll", "SleepEx"));
-        RealGetTickCount = reinterpret_cast<GetTickCountFn>(Resolve(L"kernel32.dll", "GetTickCount"));
-        RealGetTickCount64 = reinterpret_cast<GetTickCount64Fn>(Resolve(L"kernel32.dll", "GetTickCount64"));
-        RealQueryPerformanceCounter = reinterpret_cast<QueryPerformanceCounterFn>(Resolve(L"kernel32.dll", "QueryPerformanceCounter"));
-        RealQueryPerformanceFrequency = reinterpret_cast<QueryPerformanceFrequencyFn>(Resolve(L"kernel32.dll", "QueryPerformanceFrequency"));
-        RealGetSystemTimeAsFileTime = reinterpret_cast<GetSystemTimeAsFileTimeFn>(Resolve(L"kernel32.dll", "GetSystemTimeAsFileTime"));
-        RealGetSystemTimePreciseAsFileTime = reinterpret_cast<GetSystemTimePreciseAsFileTimeFn>(Resolve(L"kernel32.dll", "GetSystemTimePreciseAsFileTime"));
-        RealLoadLibraryA = reinterpret_cast<LoadLibraryAFn>(Resolve(L"kernel32.dll", "LoadLibraryA"));
-        RealLoadLibraryExA = reinterpret_cast<LoadLibraryExAFn>(Resolve(L"kernel32.dll", "LoadLibraryExA"));
-        RealLoadLibraryW = reinterpret_cast<LoadLibraryWFn>(Resolve(L"kernel32.dll", "LoadLibraryW"));
-        RealLoadLibraryExW = reinterpret_cast<LoadLibraryExWFn>(Resolve(L"kernel32.dll", "LoadLibraryExW"));
-        RealGetProcAddress = reinterpret_cast<GetProcAddressFn>(Resolve(L"kernel32.dll", "GetProcAddress"));
-        RealSetWaitableTimer = reinterpret_cast<SetWaitableTimerFn>(Resolve(L"kernel32.dll", "SetWaitableTimer"));
-        RealSetWaitableTimerEx = reinterpret_cast<SetWaitableTimerExFn>(Resolve(L"kernel32.dll", "SetWaitableTimerEx"));
-        RealSetTimer = reinterpret_cast<SetTimerFn>(Resolve(L"user32.dll", "SetTimer"));
-        RealGetMessageTime = reinterpret_cast<GetMessageTimeFn>(Resolve(L"user32.dll", "GetMessageTime"));
-        RealTimeGetTime = reinterpret_cast<TimeGetTimeFn>(Resolve(L"winmm.dll", "timeGetTime"));
-        RealTimeSetEvent = reinterpret_cast<TimeSetEventFn>(Resolve(L"winmm.dll", "timeSetEvent"));
-        RealTimeKillEvent = reinterpret_cast<TimeKillEventFn>(Resolve(L"winmm.dll", "timeKillEvent"));
+        TargetSleep = reinterpret_cast<SleepFn>(Resolve(L"kernel32.dll", "Sleep"));
+        TargetSleepEx = reinterpret_cast<SleepExFn>(Resolve(L"kernel32.dll", "SleepEx"));
+        TargetGetTickCount = reinterpret_cast<GetTickCountFn>(Resolve(L"kernel32.dll", "GetTickCount"));
+        TargetGetTickCount64 = reinterpret_cast<GetTickCount64Fn>(Resolve(L"kernel32.dll", "GetTickCount64"));
+        TargetQueryPerformanceCounter = reinterpret_cast<QueryPerformanceCounterFn>(Resolve(L"kernel32.dll", "QueryPerformanceCounter"));
+        TargetQueryPerformanceFrequency = reinterpret_cast<QueryPerformanceFrequencyFn>(Resolve(L"kernel32.dll", "QueryPerformanceFrequency"));
+        TargetGetSystemTimeAsFileTime = reinterpret_cast<GetSystemTimeAsFileTimeFn>(Resolve(L"kernel32.dll", "GetSystemTimeAsFileTime"));
+        TargetGetSystemTimePreciseAsFileTime = reinterpret_cast<GetSystemTimePreciseAsFileTimeFn>(Resolve(L"kernel32.dll", "GetSystemTimePreciseAsFileTime"));
+        TargetLoadLibraryA = reinterpret_cast<LoadLibraryAFn>(Resolve(L"kernel32.dll", "LoadLibraryA"));
+        TargetLoadLibraryExA = reinterpret_cast<LoadLibraryExAFn>(Resolve(L"kernel32.dll", "LoadLibraryExA"));
+        TargetLoadLibraryW = reinterpret_cast<LoadLibraryWFn>(Resolve(L"kernel32.dll", "LoadLibraryW"));
+        TargetLoadLibraryExW = reinterpret_cast<LoadLibraryExWFn>(Resolve(L"kernel32.dll", "LoadLibraryExW"));
+        TargetGetProcAddress = reinterpret_cast<GetProcAddressFn>(Resolve(L"kernel32.dll", "GetProcAddress"));
+        TargetSetWaitableTimer = reinterpret_cast<SetWaitableTimerFn>(Resolve(L"kernel32.dll", "SetWaitableTimer"));
+        TargetSetWaitableTimerEx = reinterpret_cast<SetWaitableTimerExFn>(Resolve(L"kernel32.dll", "SetWaitableTimerEx"));
+        TargetSetTimer = reinterpret_cast<SetTimerFn>(Resolve(L"user32.dll", "SetTimer"));
+        TargetGetMessageTime = reinterpret_cast<GetMessageTimeFn>(Resolve(L"user32.dll", "GetMessageTime"));
+        TargetTimeGetTime = reinterpret_cast<TimeGetTimeFn>(Resolve(L"winmm.dll", "timeGetTime"));
+        TargetTimeSetEvent = reinterpret_cast<TimeSetEventFn>(Resolve(L"winmm.dll", "timeSetEvent"));
+        TargetTimeKillEvent = reinterpret_cast<TimeKillEventFn>(Resolve(L"winmm.dll", "timeKillEvent"));
+
+        RealSleep = TargetSleep;
+        RealSleepEx = TargetSleepEx;
+        RealGetTickCount = TargetGetTickCount;
+        RealGetTickCount64 = TargetGetTickCount64;
+        RealQueryPerformanceCounter = TargetQueryPerformanceCounter;
+        RealQueryPerformanceFrequency = TargetQueryPerformanceFrequency;
+        RealGetSystemTimeAsFileTime = TargetGetSystemTimeAsFileTime;
+        RealGetSystemTimePreciseAsFileTime = TargetGetSystemTimePreciseAsFileTime;
+        RealLoadLibraryA = TargetLoadLibraryA;
+        RealLoadLibraryExA = TargetLoadLibraryExA;
+        RealLoadLibraryW = TargetLoadLibraryW;
+        RealLoadLibraryExW = TargetLoadLibraryExW;
+        RealGetProcAddress = TargetGetProcAddress;
+        RealSetWaitableTimer = TargetSetWaitableTimer;
+        RealSetWaitableTimerEx = TargetSetWaitableTimerEx;
+        RealSetTimer = TargetSetTimer;
+        RealGetMessageTime = TargetGetMessageTime;
+        RealTimeGetTime = TargetTimeGetTime;
+        RealTimeSetEvent = TargetTimeSetEvent;
+        RealTimeKillEvent = TargetTimeKillEvent;
     }
 
     static bool HasRequiredApiPointers()
     {
-        return RealSleep != nullptr
-            && RealSleepEx != nullptr
-            && RealGetTickCount != nullptr
-            && RealGetTickCount64 != nullptr
-            && RealQueryPerformanceCounter != nullptr
-            && RealQueryPerformanceFrequency != nullptr
-            && RealLoadLibraryA != nullptr
-            && RealLoadLibraryExA != nullptr
-            && RealLoadLibraryW != nullptr
-            && RealLoadLibraryExW != nullptr
-            && RealGetProcAddress != nullptr;
+        return TargetSleep != nullptr
+            && TargetSleepEx != nullptr
+            && TargetGetTickCount != nullptr
+            && TargetGetTickCount64 != nullptr
+            && TargetQueryPerformanceCounter != nullptr
+            && TargetQueryPerformanceFrequency != nullptr
+            && TargetLoadLibraryA != nullptr
+            && TargetLoadLibraryExA != nullptr
+            && TargetLoadLibraryW != nullptr
+            && TargetLoadLibraryExW != nullptr
+            && TargetGetProcAddress != nullptr;
     }
 
     static bool InitializeSpeedGear()
@@ -935,6 +1080,7 @@ namespace
 
             InitSharedState();
             InitializeBases();
+            InstallInlineHooks();
             InterlockedExchange(&g_patchRequested, 0);
             PatchAllModules();
             InterlockedExchange(&g_initializeState, 2);
