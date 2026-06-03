@@ -575,6 +575,30 @@
                                         Address="{Binding Address, Mode=TwoWay, TargetNullValue='about:blank'}"
                                         FullscreenModeChanged="BrowserFullscreenModeChanged"/>
 
+            <Border Grid.Column="0"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Bottom"
+                    Margin="0,0,12,12"
+                    Padding="10,5"
+                    CornerRadius="3"
+                    Background="{DynamicResource RegionBrush}"
+                    Opacity="0.9"
+                    IsHitTestVisible="False">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Visibility" Value="Visible"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding ElementName=browser, Path=InputMemoryStatusText}" Value="">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <TextBlock Text="{Binding ElementName=browser, Path=InputMemoryStatusText}"
+                           FontSize="12"
+                           TextTrimming="CharacterEllipsis"/>
+            </Border>
+
             <GridSplitter Grid.Column="1"
                           Width="5"
                           Background="Transparent"

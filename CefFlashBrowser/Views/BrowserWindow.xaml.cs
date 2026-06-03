@@ -214,8 +214,38 @@ namespace CefFlashBrowser.Views
         {
             base.OnKeyDown(e);
 
+            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.F8)
+            {
+                if (browser.IsInputMemoryPlaying)
+                    browser.StopInputMemoryPlayback();
+                else if (browser.IsInputMemoryRecording)
+                    browser.StopInputMemoryRecording();
+                else
+                    browser.StartInputMemoryRecording();
+                e.Handled = true;
+                return;
+            }
+
+            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.F9)
+            {
+                if (browser.IsInputMemoryPlaying)
+                    browser.StopInputMemoryPlayback();
+                else
+                    _ = ReplayInputMemoryFromShortcutAsync();
+                e.Handled = true;
+                return;
+            }
+
             if (e.Key == Key.Escape)
             {
+                if (browser.IsInputMemoryRecording || browser.IsInputMemoryPlaying)
+                {
+                    browser.StopInputMemoryRecording();
+                    browser.StopInputMemoryPlayback();
+                    e.Handled = true;
+                    return;
+                }
+
                 // Why not use KeyBinding: The Esc key serves other purposes in many situations, 
                 // not just stopping loading. If KeyBinding is used, this would be considered as 
                 // the event being handled, thus intercepting the Esc key event.
@@ -227,6 +257,19 @@ namespace CefFlashBrowser.Views
                 {
                     browser.Stop();
                 }
+            }
+        }
+
+        private async System.Threading.Tasks.Task ReplayInputMemoryFromShortcutAsync()
+        {
+            try
+            {
+                await browser.ReplayInputMemoryAsync();
+            }
+            catch (Exception ex)
+            {
+                LogHelper.LogError("Failed to replay input macro from shortcut", ex);
+                WindowManager.ShowError(ex.Message);
             }
         }
 
