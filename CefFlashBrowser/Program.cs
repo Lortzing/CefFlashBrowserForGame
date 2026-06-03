@@ -107,6 +107,7 @@ namespace CefFlashBrowser
         private static void InitCefFlash()
         {
             Environment.SetEnvironmentVariable("ComSpec", GlobalData.EmptyExePath); //Remove black popup window
+            SpeedGearController.EnsureInitialized();
 
             var settings = new CefFlashSettings()
             {
@@ -117,6 +118,18 @@ namespace CefFlashBrowser
                 EnableSystemFlash = true,
                 BrowserSubprocessPath = GlobalData.SubprocessPath
             };
+
+            var appSubprocessPath = Path.Combine(GlobalData.AppBaseDirectory, "CefFlashBrowser.Subprocess.exe");
+            var speedGearPath = Path.Combine(GlobalData.AppBaseDirectory, "CefFlashBrowser.SpeedGear.dll");
+            if (File.Exists(appSubprocessPath) && File.Exists(speedGearPath))
+            {
+                settings.BrowserSubprocessPath = appSubprocessPath;
+            }
+            else
+            {
+                LogHelper.LogError(
+                    $"SpeedGear backend files not found, falling back to default CefSharp subprocess. Subprocess: {appSubprocessPath}, SpeedGear: {speedGearPath}");
+            }
 
             if (GlobalData.Settings.FakeFlashVersionSetting.Enable)
             {

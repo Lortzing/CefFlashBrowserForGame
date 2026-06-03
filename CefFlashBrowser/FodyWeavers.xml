@@ -3,6 +3,8 @@
     <ExcludeAssemblies>
       CefFlashBrowser.Singleton
       CefFlashBrowser.Sol
+      CefFlashBrowser.SpeedGear
+      CefFlashBrowser.Subprocess
     </ExcludeAssemblies>
   </Costura>
 </Weavers>

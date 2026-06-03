@@ -19,8 +19,11 @@ namespace
     using GetTickCount64Fn = ULONGLONG (WINAPI*)();
     using QueryPerformanceCounterFn = BOOL (WINAPI*)(LARGE_INTEGER*);
     using GetSystemTimeAsFileTimeFn = void (WINAPI*)(LPFILETIME);
+    using GetSystemTimePreciseAsFileTimeFn = void (WINAPI*)(LPFILETIME);
     using SetTimerFn = UINT_PTR (WINAPI*)(HWND, UINT_PTR, UINT, TIMERPROC);
+    using GetMessageTimeFn = LONG (WINAPI*)();
     using TimeGetTimeFn = DWORD (WINAPI*)();
+    using TimeSetEventFn = MMRESULT (WINAPI*)(UINT, UINT, LPTIMECALLBACK, DWORD_PTR, UINT);
 
     SharedState* g_shared = nullptr;
     long long g_generation = 0;
@@ -32,14 +35,28 @@ namespace
     GetTickCount64Fn RealGetTickCount64 = nullptr;
     QueryPerformanceCounterFn RealQueryPerformanceCounter = nullptr;
     GetSystemTimeAsFileTimeFn RealGetSystemTimeAsFileTime = nullptr;
+    GetSystemTimePreciseAsFileTimeFn RealGetSystemTimePreciseAsFileTime = nullptr;
     SetTimerFn RealSetTimer = nullptr;
+    GetMessageTimeFn RealGetMessageTime = nullptr;
     TimeGetTimeFn RealTimeGetTime = nullptr;
+    TimeSetEventFn RealTimeSetEvent = nullptr;
+    HANDLE g_workerThread = nullptr;
+    SRWLOCK g_stateLock = SRWLOCK_INIT;
 
-    DWORD g_baseTick = 0;
-    ULONGLONG g_baseTick64 = 0;
-    DWORD g_baseTimeGetTime = 0;
-    LARGE_INTEGER g_baseQpc{};
-    FILETIME g_baseFileTime{};
+    static void InitSharedState();
+
+    DWORD g_realBaseTick = 0;
+    DWORD g_virtualBaseTick = 0;
+    ULONGLONG g_realBaseTick64 = 0;
+    ULONGLONG g_virtualBaseTick64 = 0;
+    DWORD g_realBaseTimeGetTime = 0;
+    DWORD g_virtualBaseTimeGetTime = 0;
+    LONG g_realBaseMessageTime = 0;
+    LONG g_virtualBaseMessageTime = 0;
+    LARGE_INTEGER g_realBaseQpc{};
+    LARGE_INTEGER g_virtualBaseQpc{};
+    FILETIME g_realBaseFileTime{};
+    FILETIME g_virtualBaseFileTime{};
 
     static ULONGLONG FileTimeToU64(FILETIME ft)
     {
@@ -62,56 +79,150 @@ namespace
         return module ? GetProcAddress(module, functionName) : nullptr;
     }
 
-    static void ResetBases()
+    static void GetRealFileTime(LPFILETIME out)
     {
-        g_baseTick = RealGetTickCount ? RealGetTickCount() : ::GetTickCount();
-        g_baseTick64 = RealGetTickCount64 ? RealGetTickCount64() : ::GetTickCount64();
-        g_baseTimeGetTime = RealTimeGetTime ? RealTimeGetTime() : ::timeGetTime();
-        if (RealQueryPerformanceCounter)
-            RealQueryPerformanceCounter(&g_baseQpc);
+        if (RealGetSystemTimePreciseAsFileTime)
+        {
+            RealGetSystemTimePreciseAsFileTime(out);
+        }
+        else if (RealGetSystemTimeAsFileTime)
+        {
+            RealGetSystemTimeAsFileTime(out);
+        }
         else
-            ::QueryPerformanceCounter(&g_baseQpc);
-        if (RealGetSystemTimeAsFileTime)
-            RealGetSystemTimeAsFileTime(&g_baseFileTime);
-        else
-            ::GetSystemTimeAsFileTime(&g_baseFileTime);
+        {
+            ::GetSystemTimeAsFileTime(out);
+        }
     }
 
-    static double CurrentSpeed()
+    static DWORD ScaleDwordTime(DWORD realNow, DWORD realBase, DWORD virtualBase, double speed)
+    {
+        const auto delta = realNow - realBase;
+        return static_cast<DWORD>(virtualBase + static_cast<DWORD>(delta * speed));
+    }
+
+    static ULONGLONG ScaleUlongLongTime(ULONGLONG realNow, ULONGLONG realBase, ULONGLONG virtualBase, double speed)
+    {
+        const auto delta = realNow - realBase;
+        return static_cast<ULONGLONG>(virtualBase + static_cast<ULONGLONG>(delta * speed));
+    }
+
+    static LONGLONG ScaleLongLongTime(LONGLONG realNow, LONGLONG realBase, LONGLONG virtualBase, double speed)
+    {
+        const auto delta = realNow - realBase;
+        return static_cast<LONGLONG>(virtualBase + static_cast<LONGLONG>(delta * speed));
+    }
+
+    static void InitializeBases()
+    {
+        g_realBaseTick = RealGetTickCount ? RealGetTickCount() : ::GetTickCount();
+        g_virtualBaseTick = g_realBaseTick;
+        g_realBaseTick64 = RealGetTickCount64 ? RealGetTickCount64() : ::GetTickCount64();
+        g_virtualBaseTick64 = g_realBaseTick64;
+        g_realBaseTimeGetTime = RealTimeGetTime ? RealTimeGetTime() : ::timeGetTime();
+        g_virtualBaseTimeGetTime = g_realBaseTimeGetTime;
+        g_realBaseMessageTime = RealGetMessageTime ? RealGetMessageTime() : ::GetMessageTime();
+        g_virtualBaseMessageTime = g_realBaseMessageTime;
+        if (RealQueryPerformanceCounter)
+            RealQueryPerformanceCounter(&g_realBaseQpc);
+        else
+            ::QueryPerformanceCounter(&g_realBaseQpc);
+        g_virtualBaseQpc = g_realBaseQpc;
+        GetRealFileTime(&g_realBaseFileTime);
+        g_virtualBaseFileTime = g_realBaseFileTime;
+    }
+
+    static void RebaseForSpeedChange(double newSpeed)
+    {
+        const auto oldSpeed = g_speed;
+
+        const auto tickNow = RealGetTickCount ? RealGetTickCount() : ::GetTickCount();
+        g_virtualBaseTick = ScaleDwordTime(tickNow, g_realBaseTick, g_virtualBaseTick, oldSpeed);
+        g_realBaseTick = tickNow;
+
+        const auto tick64Now = RealGetTickCount64 ? RealGetTickCount64() : ::GetTickCount64();
+        g_virtualBaseTick64 = ScaleUlongLongTime(tick64Now, g_realBaseTick64, g_virtualBaseTick64, oldSpeed);
+        g_realBaseTick64 = tick64Now;
+
+        const auto timeGetTimeNow = RealTimeGetTime ? RealTimeGetTime() : ::timeGetTime();
+        g_virtualBaseTimeGetTime = ScaleDwordTime(timeGetTimeNow, g_realBaseTimeGetTime, g_virtualBaseTimeGetTime, oldSpeed);
+        g_realBaseTimeGetTime = timeGetTimeNow;
+
+        const auto messageTimeNow = RealGetMessageTime ? RealGetMessageTime() : ::GetMessageTime();
+        g_virtualBaseMessageTime = static_cast<LONG>(ScaleDwordTime(
+            static_cast<DWORD>(messageTimeNow),
+            static_cast<DWORD>(g_realBaseMessageTime),
+            static_cast<DWORD>(g_virtualBaseMessageTime),
+            oldSpeed));
+        g_realBaseMessageTime = messageTimeNow;
+
+        LARGE_INTEGER qpcNow{};
+        if (RealQueryPerformanceCounter)
+            RealQueryPerformanceCounter(&qpcNow);
+        else
+            ::QueryPerformanceCounter(&qpcNow);
+        g_virtualBaseQpc.QuadPart = ScaleLongLongTime(qpcNow.QuadPart, g_realBaseQpc.QuadPart, g_virtualBaseQpc.QuadPart, oldSpeed);
+        g_realBaseQpc = qpcNow;
+
+        FILETIME fileTimeNow{};
+        GetRealFileTime(&fileTimeNow);
+        const auto virtualFileTime = ScaleUlongLongTime(
+            FileTimeToU64(fileTimeNow),
+            FileTimeToU64(g_realBaseFileTime),
+            FileTimeToU64(g_virtualBaseFileTime),
+            oldSpeed);
+        g_virtualBaseFileTime = U64ToFileTime(virtualFileTime);
+        g_realBaseFileTime = fileTimeNow;
+
+        g_speed = newSpeed;
+    }
+
+    static void SyncSpeedLocked()
     {
         if (g_shared && g_shared->generation != g_generation)
         {
             g_generation = g_shared->generation;
-            g_speed = g_shared->speed > 0 ? g_shared->speed : 1.0;
-            ResetBases();
+            const auto nextSpeed = g_shared->speed > 0 ? g_shared->speed : 1.0;
+            RebaseForSpeedChange(nextSpeed);
         }
-        return g_speed;
     }
 
     void WINAPI HookSleep(DWORD ms)
     {
-        const auto speed = CurrentSpeed();
-        RealSleep(static_cast<DWORD>(ms / speed));
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
+        const auto scaled = static_cast<DWORD>(ms / g_speed);
+        ReleaseSRWLockExclusive(&g_stateLock);
+        RealSleep(scaled);
     }
 
     DWORD WINAPI HookSleepEx(DWORD ms, BOOL alertable)
     {
-        const auto speed = CurrentSpeed();
-        return RealSleepEx(static_cast<DWORD>(ms / speed), alertable);
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
+        const auto scaled = static_cast<DWORD>(ms / g_speed);
+        ReleaseSRWLockExclusive(&g_stateLock);
+        return RealSleepEx(scaled, alertable);
     }
 
     DWORD WINAPI HookGetTickCount()
     {
-        const auto speed = CurrentSpeed();
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
         const auto now = RealGetTickCount();
-        return static_cast<DWORD>(g_baseTick + (now - g_baseTick) * speed);
+        const auto scaled = ScaleDwordTime(now, g_realBaseTick, g_virtualBaseTick, g_speed);
+        ReleaseSRWLockExclusive(&g_stateLock);
+        return scaled;
     }
 
     ULONGLONG WINAPI HookGetTickCount64()
     {
-        const auto speed = CurrentSpeed();
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
         const auto now = RealGetTickCount64();
-        return static_cast<ULONGLONG>(g_baseTick64 + (now - g_baseTick64) * speed);
+        const auto scaled = ScaleUlongLongTime(now, g_realBaseTick64, g_virtualBaseTick64, g_speed);
+        ReleaseSRWLockExclusive(&g_stateLock);
+        return scaled;
     }
 
     BOOL WINAPI HookQueryPerformanceCounter(LARGE_INTEGER* out)
@@ -119,30 +230,48 @@ namespace
         if (!out)
             return FALSE;
 
-        const auto speed = CurrentSpeed();
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
         LARGE_INTEGER now{};
         const auto ok = RealQueryPerformanceCounter(&now);
-        out->QuadPart = static_cast<LONGLONG>(g_baseQpc.QuadPart + (now.QuadPart - g_baseQpc.QuadPart) * speed);
+        out->QuadPart = ScaleLongLongTime(now.QuadPart, g_realBaseQpc.QuadPart, g_virtualBaseQpc.QuadPart, g_speed);
+        ReleaseSRWLockExclusive(&g_stateLock);
         return ok;
     }
 
-    void WINAPI HookGetSystemTimeAsFileTime(LPFILETIME out)
+    void WINAPI HookSystemTimeAsFileTime(LPFILETIME out)
     {
         if (!out)
             return;
 
-        const auto speed = CurrentSpeed();
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
         FILETIME now{};
-        RealGetSystemTimeAsFileTime(&now);
-        const auto delta = FileTimeToU64(now) - FileTimeToU64(g_baseFileTime);
-        const auto value = FileTimeToU64(g_baseFileTime) + static_cast<ULONGLONG>(delta * speed);
-        *out = U64ToFileTime(value);
+        GetRealFileTime(&now);
+        *out = U64ToFileTime(ScaleUlongLongTime(
+            FileTimeToU64(now),
+            FileTimeToU64(g_realBaseFileTime),
+            FileTimeToU64(g_virtualBaseFileTime),
+            g_speed));
+        ReleaseSRWLockExclusive(&g_stateLock);
+    }
+
+    void WINAPI HookGetSystemTimeAsFileTime(LPFILETIME out)
+    {
+        HookSystemTimeAsFileTime(out);
+    }
+
+    void WINAPI HookGetSystemTimePreciseAsFileTime(LPFILETIME out)
+    {
+        HookSystemTimeAsFileTime(out);
     }
 
     UINT_PTR WINAPI HookSetTimer(HWND hwnd, UINT_PTR id, UINT elapse, TIMERPROC proc)
     {
-        const auto speed = CurrentSpeed();
-        auto scaled = static_cast<UINT>(elapse / speed);
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
+        auto scaled = static_cast<UINT>(elapse / g_speed);
+        ReleaseSRWLockExclusive(&g_stateLock);
         if (scaled < 1)
             scaled = 1;
         return RealSetTimer(hwnd, id, scaled, proc);
@@ -150,9 +279,37 @@ namespace
 
     DWORD WINAPI HookTimeGetTime()
     {
-        const auto speed = CurrentSpeed();
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
         const auto now = RealTimeGetTime();
-        return static_cast<DWORD>(g_baseTimeGetTime + (now - g_baseTimeGetTime) * speed);
+        const auto scaled = ScaleDwordTime(now, g_realBaseTimeGetTime, g_virtualBaseTimeGetTime, g_speed);
+        ReleaseSRWLockExclusive(&g_stateLock);
+        return scaled;
+    }
+
+    LONG WINAPI HookGetMessageTime()
+    {
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
+        const auto now = RealGetMessageTime();
+        const auto scaled = static_cast<LONG>(ScaleDwordTime(
+            static_cast<DWORD>(now),
+            static_cast<DWORD>(g_realBaseMessageTime),
+            static_cast<DWORD>(g_virtualBaseMessageTime),
+            g_speed));
+        ReleaseSRWLockExclusive(&g_stateLock);
+        return scaled;
+    }
+
+    MMRESULT WINAPI HookTimeSetEvent(UINT delay, UINT resolution, LPTIMECALLBACK proc, DWORD_PTR user, UINT event)
+    {
+        AcquireSRWLockExclusive(&g_stateLock);
+        SyncSpeedLocked();
+        auto scaled = static_cast<UINT>(delay / g_speed);
+        ReleaseSRWLockExclusive(&g_stateLock);
+        if (scaled < 1)
+            scaled = 1;
+        return RealTimeSetEvent(scaled, resolution, proc, user, event);
     }
 
     static void PatchImport(HMODULE module, const char* importedName, FARPROC replacement)
@@ -213,8 +370,43 @@ namespace
             PatchImport(modules[i], "GetTickCount64", reinterpret_cast<FARPROC>(HookGetTickCount64));
             PatchImport(modules[i], "QueryPerformanceCounter", reinterpret_cast<FARPROC>(HookQueryPerformanceCounter));
             PatchImport(modules[i], "GetSystemTimeAsFileTime", reinterpret_cast<FARPROC>(HookGetSystemTimeAsFileTime));
+            PatchImport(modules[i], "GetSystemTimePreciseAsFileTime", reinterpret_cast<FARPROC>(HookGetSystemTimePreciseAsFileTime));
             PatchImport(modules[i], "SetTimer", reinterpret_cast<FARPROC>(HookSetTimer));
+            PatchImport(modules[i], "GetMessageTime", reinterpret_cast<FARPROC>(HookGetMessageTime));
             PatchImport(modules[i], "timeGetTime", reinterpret_cast<FARPROC>(HookTimeGetTime));
+            PatchImport(modules[i], "timeSetEvent", reinterpret_cast<FARPROC>(HookTimeSetEvent));
+        }
+    }
+
+    DWORD WINAPI SpeedGearWorker(LPVOID)
+    {
+        RealSleep = reinterpret_cast<SleepFn>(Resolve(L"kernel32.dll", "Sleep"));
+        RealSleepEx = reinterpret_cast<SleepExFn>(Resolve(L"kernel32.dll", "SleepEx"));
+        RealGetTickCount = reinterpret_cast<GetTickCountFn>(Resolve(L"kernel32.dll", "GetTickCount"));
+        RealGetTickCount64 = reinterpret_cast<GetTickCount64Fn>(Resolve(L"kernel32.dll", "GetTickCount64"));
+        RealQueryPerformanceCounter = reinterpret_cast<QueryPerformanceCounterFn>(Resolve(L"kernel32.dll", "QueryPerformanceCounter"));
+        RealGetSystemTimeAsFileTime = reinterpret_cast<GetSystemTimeAsFileTimeFn>(Resolve(L"kernel32.dll", "GetSystemTimeAsFileTime"));
+        RealGetSystemTimePreciseAsFileTime = reinterpret_cast<GetSystemTimePreciseAsFileTimeFn>(Resolve(L"kernel32.dll", "GetSystemTimePreciseAsFileTime"));
+        RealSetTimer = reinterpret_cast<SetTimerFn>(Resolve(L"user32.dll", "SetTimer"));
+        RealGetMessageTime = reinterpret_cast<GetMessageTimeFn>(Resolve(L"user32.dll", "GetMessageTime"));
+        RealTimeGetTime = reinterpret_cast<TimeGetTimeFn>(Resolve(L"winmm.dll", "timeGetTime"));
+        RealTimeSetEvent = reinterpret_cast<TimeSetEventFn>(Resolve(L"winmm.dll", "timeSetEvent"));
+
+        InitSharedState();
+        InitializeBases();
+
+        for (;;)
+        {
+            PatchAllModules();
+
+            if (RealSleep)
+            {
+                RealSleep(1000);
+            }
+            else
+            {
+                ::Sleep(1000);
+            }
         }
     }
 
@@ -240,17 +432,12 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(module);
-        RealSleep = reinterpret_cast<SleepFn>(Resolve(L"kernel32.dll", "Sleep"));
-        RealSleepEx = reinterpret_cast<SleepExFn>(Resolve(L"kernel32.dll", "SleepEx"));
-        RealGetTickCount = reinterpret_cast<GetTickCountFn>(Resolve(L"kernel32.dll", "GetTickCount"));
-        RealGetTickCount64 = reinterpret_cast<GetTickCount64Fn>(Resolve(L"kernel32.dll", "GetTickCount64"));
-        RealQueryPerformanceCounter = reinterpret_cast<QueryPerformanceCounterFn>(Resolve(L"kernel32.dll", "QueryPerformanceCounter"));
-        RealGetSystemTimeAsFileTime = reinterpret_cast<GetSystemTimeAsFileTimeFn>(Resolve(L"kernel32.dll", "GetSystemTimeAsFileTime"));
-        RealSetTimer = reinterpret_cast<SetTimerFn>(Resolve(L"user32.dll", "SetTimer"));
-        RealTimeGetTime = reinterpret_cast<TimeGetTimeFn>(Resolve(L"winmm.dll", "timeGetTime"));
-        InitSharedState();
-        ResetBases();
-        PatchAllModules();
+        g_workerThread = CreateThread(nullptr, 0, SpeedGearWorker, nullptr, 0, nullptr);
+        if (g_workerThread)
+        {
+            CloseHandle(g_workerThread);
+            g_workerThread = nullptr;
+        }
     }
     return TRUE;
 }

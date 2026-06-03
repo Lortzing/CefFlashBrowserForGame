@@ -1,7 +1,7 @@
 ﻿using CefFlashBrowser.Data;
+using CefFlashBrowser.FlashBrowser;
 using CefFlashBrowser.Models;
 using CefFlashBrowser.Utils;
-using CefFlashBrowser.Utils.SpeedGear;
 using CefSharp;
 using IWshRuntimeLibrary;
 using SimpleMvvm;
@@ -104,8 +104,7 @@ namespace CefFlashBrowser.ViewModels
         {
             try
             {
-                SpeedGearManager.SetSpeedFactor(speedFactor);
-                SpeedFactor = speedFactor;
+                SpeedFactor = SpeedGearController.SetFactor(speedFactor);
             }
             catch (Exception e)
             {

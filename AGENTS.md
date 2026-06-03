@@ -32,7 +32,7 @@ publish
 
 ## Architecture
 
-**Solution:** `CefFlashBrowser.slnx` — 8 projects, MVVM pattern using SimpleMvvm framework.
+**Solution:** `CefFlashBrowser.slnx` — 10 projects, MVVM pattern using SimpleMvvm framework.
 
 ### Projects
 
@@ -43,6 +43,8 @@ publish
 | **CefFlashBrowser.WinformCefSharp4WPF** | C# Library | Bridges WinForms CefSharp into WPF via HwndHost |
 | **CefFlashBrowser.Sol** | C++/CLI Library | SOL file parser/writer with AMF0/AMF3 serialization |
 | **CefFlashBrowser.Singleton** | C++/CLI Library | Win32 IPC messaging for single-instance enforcement |
+| **CefFlashBrowser.SpeedGear** | C++/CLI Library | Native time hook backend for Flash speed control |
+| **CefFlashBrowser.Subprocess** | C# Exe | Custom CefSharp subprocess wrapper that loads `CefFlashBrowser.SpeedGear.dll` |
 | **CefFlashBrowser.Log** | C# Library (.NET 4.6.2) | File-based logging |
 | **CefFlashBrowser.EmptyExe** | WPF Exe | Minimal subprocess used by CefSharp |
 | **CefFlashBrowser.Tests** | MSTest (.NET 4.6.2) | Unit tests — links source files from main app via `<Compile Include>` |
@@ -74,7 +76,8 @@ publish
 ### Key Patterns
 
 - **MVVM messaging:** Cross-component communication uses `Messenger` with tokens defined in `MessageTokens.cs`
-- **Assembly embedding:** Costura.Fody bundles managed DLLs into the main exe; native DLLs (Sol, Singleton) are excluded and shipped separately
+- **Assembly embedding:** Costura.Fody bundles managed DLLs into the main exe; native DLLs (Sol, Singleton, SpeedGear) are excluded and shipped separately
+- **SpeedGear:** Browser speed changes use `SpeedGearController` to write a shared memory factor. `CefFlashBrowser.Subprocess.exe` loads `CefFlashBrowser.SpeedGear.dll`, whose native hooks scale process timing APIs. Both files must remain physical output files and be excluded from Costura embedding. Do not reintroduce the old JavaScript timer hook for speed control.
 - **Post-build scripts:** The main `.csproj` has extensive post-build steps that extract tar.gz CEF/Flash archives and organize output directories
 - **Localization:** XAML resource dictionaries in `Assets/Language/`; managed by `LanguageManager`
 - **User data:** Stored in `%USERPROFILE%\Documents\CefFlashBrowser\` (settings.json, favorites.json)
