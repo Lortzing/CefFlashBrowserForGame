@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO.MemoryMappedFiles;
+using System.Threading;
 
 namespace CefFlashBrowser.FlashBrowser
 {
@@ -79,12 +80,17 @@ namespace CefFlashBrowser.FlashBrowser
 
         private static void WriteSharedStateLocked(double factor)
         {
-            _generation++;
+            var nextGeneration = _generation + 2;
 
             // Native struct layout: int64 generation at offset 0, double speed at offset 8.
+            // Odd generation means a write is in progress; even generation is stable.
+            _accessor.Write(0, nextGeneration - 1);
+            Thread.MemoryBarrier();
             _accessor.Write(8, factor);
-            _accessor.Write(0, _generation);
+            Thread.MemoryBarrier();
+            _accessor.Write(0, nextGeneration);
             _accessor.Flush();
+            _generation = nextGeneration;
         }
     }
 }

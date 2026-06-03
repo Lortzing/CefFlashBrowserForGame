@@ -19,8 +19,11 @@ namespace
     using GetTickCountFn = DWORD (WINAPI*)();
     using GetTickCount64Fn = ULONGLONG (WINAPI*)();
     using QueryPerformanceCounterFn = BOOL (WINAPI*)(LARGE_INTEGER*);
+    using QueryPerformanceFrequencyFn = BOOL (WINAPI*)(LARGE_INTEGER*);
     using GetSystemTimeAsFileTimeFn = void (WINAPI*)(LPFILETIME);
     using GetSystemTimePreciseAsFileTimeFn = void (WINAPI*)(LPFILETIME);
+    using LoadLibraryWFn = HMODULE (WINAPI*)(LPCWSTR);
+    using LoadLibraryExWFn = HMODULE (WINAPI*)(LPCWSTR, HANDLE, DWORD);
     using SetTimerFn = UINT_PTR (WINAPI*)(HWND, UINT_PTR, UINT, TIMERPROC);
     using GetMessageTimeFn = LONG (WINAPI*)();
     using TimeGetTimeFn = DWORD (WINAPI*)();
@@ -36,8 +39,11 @@ namespace
     GetTickCountFn RealGetTickCount = nullptr;
     GetTickCount64Fn RealGetTickCount64 = nullptr;
     QueryPerformanceCounterFn RealQueryPerformanceCounter = nullptr;
+    QueryPerformanceFrequencyFn RealQueryPerformanceFrequency = nullptr;
     GetSystemTimeAsFileTimeFn RealGetSystemTimeAsFileTime = nullptr;
     GetSystemTimePreciseAsFileTimeFn RealGetSystemTimePreciseAsFileTime = nullptr;
+    LoadLibraryWFn RealLoadLibraryW = nullptr;
+    LoadLibraryExWFn RealLoadLibraryExW = nullptr;
     SetTimerFn RealSetTimer = nullptr;
     GetMessageTimeFn RealGetMessageTime = nullptr;
     TimeGetTimeFn RealTimeGetTime = nullptr;
@@ -49,6 +55,7 @@ namespace
     DWORD g_lastDebugTick = 0;
 
     static void InitSharedState();
+    static void PatchAllModules();
 
     DWORD g_realBaseTick = 0;
     DWORD g_virtualBaseTick = 0;
@@ -159,6 +166,34 @@ namespace
         return scaled < 1 ? 1 : scaled;
     }
 
+    static bool TryReadSharedSpeed(long long* generation, double* speed)
+    {
+        if (!g_shared || !generation || !speed)
+            return false;
+
+        for (int i = 0; i < 8; ++i)
+        {
+            const auto startGeneration = g_shared->generation;
+            MemoryBarrier();
+
+            if ((startGeneration & 1) != 0)
+                continue;
+
+            const auto currentSpeed = g_shared->speed;
+            MemoryBarrier();
+
+            const auto endGeneration = g_shared->generation;
+            if (startGeneration == endGeneration && (endGeneration & 1) == 0)
+            {
+                *generation = endGeneration;
+                *speed = currentSpeed;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     static void InitializeBases()
     {
         g_realBaseTick = RealGetTickCount ? RealGetTickCount() : ::GetTickCount();
@@ -226,10 +261,12 @@ namespace
 
     static void SyncSpeedLocked()
     {
-        if (g_shared && g_shared->generation != g_generation)
+        long long generation = 0;
+        double speed = 1.0;
+        if (TryReadSharedSpeed(&generation, &speed) && generation != g_generation)
         {
-            g_generation = g_shared->generation;
-            const auto nextSpeed = g_shared->speed > 0 ? g_shared->speed : 1.0;
+            g_generation = generation;
+            const auto nextSpeed = speed > 0 ? speed : 1.0;
             RebaseForSpeedChange(nextSpeed);
         }
     }
@@ -284,6 +321,14 @@ namespace
         out->QuadPart = ScaleLongLongTime(now.QuadPart, g_realBaseQpc.QuadPart, g_virtualBaseQpc.QuadPart, g_speed);
         ReleaseSRWLockExclusive(&g_stateLock);
         return ok;
+    }
+
+    BOOL WINAPI HookQueryPerformanceFrequency(LARGE_INTEGER* out)
+    {
+        if (!RealQueryPerformanceFrequency)
+            return FALSE;
+
+        return RealQueryPerformanceFrequency(out);
     }
 
     void WINAPI HookSystemTimeAsFileTime(LPFILETIME out)
@@ -365,6 +410,28 @@ namespace
         return RealTimeKillEvent(timerId);
     }
 
+    HMODULE WINAPI HookLoadLibraryW(LPCWSTR fileName)
+    {
+        if (!RealLoadLibraryW)
+            return nullptr;
+
+        const auto module = RealLoadLibraryW(fileName);
+        if (module)
+            PatchAllModules();
+        return module;
+    }
+
+    HMODULE WINAPI HookLoadLibraryExW(LPCWSTR fileName, HANDLE file, DWORD flags)
+    {
+        if (!RealLoadLibraryExW)
+            return nullptr;
+
+        const auto module = RealLoadLibraryExW(fileName, file, flags);
+        if (module)
+            PatchAllModules();
+        return module;
+    }
+
     static void PatchImport(HMODULE module, const char* importedName, FARPROC replacement)
     {
         auto base = reinterpret_cast<std::uint8_t*>(module);
@@ -417,18 +484,36 @@ namespace
         const auto count = needed / sizeof(HMODULE);
         for (DWORD i = 0; i < count; ++i)
         {
-            PatchImport(modules[i], "Sleep", reinterpret_cast<FARPROC>(HookSleep));
-            PatchImport(modules[i], "SleepEx", reinterpret_cast<FARPROC>(HookSleepEx));
-            PatchImport(modules[i], "GetTickCount", reinterpret_cast<FARPROC>(HookGetTickCount));
-            PatchImport(modules[i], "GetTickCount64", reinterpret_cast<FARPROC>(HookGetTickCount64));
-            PatchImport(modules[i], "QueryPerformanceCounter", reinterpret_cast<FARPROC>(HookQueryPerformanceCounter));
-            PatchImport(modules[i], "GetSystemTimeAsFileTime", reinterpret_cast<FARPROC>(HookGetSystemTimeAsFileTime));
-            PatchImport(modules[i], "GetSystemTimePreciseAsFileTime", reinterpret_cast<FARPROC>(HookGetSystemTimePreciseAsFileTime));
-            PatchImport(modules[i], "SetTimer", reinterpret_cast<FARPROC>(HookSetTimer));
-            PatchImport(modules[i], "GetMessageTime", reinterpret_cast<FARPROC>(HookGetMessageTime));
-            PatchImport(modules[i], "timeGetTime", reinterpret_cast<FARPROC>(HookTimeGetTime));
-            PatchImport(modules[i], "timeSetEvent", reinterpret_cast<FARPROC>(HookTimeSetEvent));
-            PatchImport(modules[i], "timeKillEvent", reinterpret_cast<FARPROC>(HookTimeKillEvent));
+            if (RealSleep)
+                PatchImport(modules[i], "Sleep", reinterpret_cast<FARPROC>(HookSleep));
+            if (RealSleepEx)
+                PatchImport(modules[i], "SleepEx", reinterpret_cast<FARPROC>(HookSleepEx));
+            if (RealGetTickCount)
+                PatchImport(modules[i], "GetTickCount", reinterpret_cast<FARPROC>(HookGetTickCount));
+            if (RealGetTickCount64)
+                PatchImport(modules[i], "GetTickCount64", reinterpret_cast<FARPROC>(HookGetTickCount64));
+            if (RealQueryPerformanceCounter)
+                PatchImport(modules[i], "QueryPerformanceCounter", reinterpret_cast<FARPROC>(HookQueryPerformanceCounter));
+            if (RealQueryPerformanceFrequency)
+                PatchImport(modules[i], "QueryPerformanceFrequency", reinterpret_cast<FARPROC>(HookQueryPerformanceFrequency));
+            if (RealGetSystemTimeAsFileTime)
+                PatchImport(modules[i], "GetSystemTimeAsFileTime", reinterpret_cast<FARPROC>(HookGetSystemTimeAsFileTime));
+            if (RealGetSystemTimePreciseAsFileTime)
+                PatchImport(modules[i], "GetSystemTimePreciseAsFileTime", reinterpret_cast<FARPROC>(HookGetSystemTimePreciseAsFileTime));
+            if (RealLoadLibraryW)
+                PatchImport(modules[i], "LoadLibraryW", reinterpret_cast<FARPROC>(HookLoadLibraryW));
+            if (RealLoadLibraryExW)
+                PatchImport(modules[i], "LoadLibraryExW", reinterpret_cast<FARPROC>(HookLoadLibraryExW));
+            if (RealSetTimer)
+                PatchImport(modules[i], "SetTimer", reinterpret_cast<FARPROC>(HookSetTimer));
+            if (RealGetMessageTime)
+                PatchImport(modules[i], "GetMessageTime", reinterpret_cast<FARPROC>(HookGetMessageTime));
+            if (RealTimeGetTime)
+                PatchImport(modules[i], "timeGetTime", reinterpret_cast<FARPROC>(HookTimeGetTime));
+            if (RealTimeSetEvent)
+                PatchImport(modules[i], "timeSetEvent", reinterpret_cast<FARPROC>(HookTimeSetEvent));
+            if (RealTimeKillEvent)
+                PatchImport(modules[i], "timeKillEvent", reinterpret_cast<FARPROC>(HookTimeKillEvent));
         }
     }
 
@@ -493,8 +578,11 @@ namespace
         RealGetTickCount = reinterpret_cast<GetTickCountFn>(Resolve(L"kernel32.dll", "GetTickCount"));
         RealGetTickCount64 = reinterpret_cast<GetTickCount64Fn>(Resolve(L"kernel32.dll", "GetTickCount64"));
         RealQueryPerformanceCounter = reinterpret_cast<QueryPerformanceCounterFn>(Resolve(L"kernel32.dll", "QueryPerformanceCounter"));
+        RealQueryPerformanceFrequency = reinterpret_cast<QueryPerformanceFrequencyFn>(Resolve(L"kernel32.dll", "QueryPerformanceFrequency"));
         RealGetSystemTimeAsFileTime = reinterpret_cast<GetSystemTimeAsFileTimeFn>(Resolve(L"kernel32.dll", "GetSystemTimeAsFileTime"));
         RealGetSystemTimePreciseAsFileTime = reinterpret_cast<GetSystemTimePreciseAsFileTimeFn>(Resolve(L"kernel32.dll", "GetSystemTimePreciseAsFileTime"));
+        RealLoadLibraryW = reinterpret_cast<LoadLibraryWFn>(Resolve(L"kernel32.dll", "LoadLibraryW"));
+        RealLoadLibraryExW = reinterpret_cast<LoadLibraryExWFn>(Resolve(L"kernel32.dll", "LoadLibraryExW"));
         RealSetTimer = reinterpret_cast<SetTimerFn>(Resolve(L"user32.dll", "SetTimer"));
         RealGetMessageTime = reinterpret_cast<GetMessageTimeFn>(Resolve(L"user32.dll", "GetMessageTime"));
         RealTimeGetTime = reinterpret_cast<TimeGetTimeFn>(Resolve(L"winmm.dll", "timeGetTime"));
@@ -529,8 +617,9 @@ namespace
         g_shared = reinterpret_cast<SharedState*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedState)));
         if (g_shared)
         {
-            g_generation = g_shared->generation;
-            g_speed = g_shared->speed > 0 ? g_shared->speed : 1.0;
+            double speed = 1.0;
+            if (TryReadSharedSpeed(&g_generation, &speed))
+                g_speed = speed > 0 ? speed : 1.0;
         }
     }
 }
