@@ -41,7 +41,7 @@ namespace CefFlashBrowser.FlashBrowser
             _inputMemoryLoopIndex = 0;
             _inputMemoryLoopTotal = loopCount;
 
-            LogReplayWindowSnapshot("stable replay started", $"count={events.Count}; speed={speed:0.###}; loopCount={loopCount}; loopIntervalMs={loopIntervalMs}; mouseMode=background-child-postmessage; coordinateMode=ratio-adaptive; version={playbackVersion}");
+            LogReplayWindowSnapshot("stable replay started", $"count={events.Count}; speed={speed:0.###}; loopCount={loopCount}; loopIntervalMs={loopIntervalMs}; mouseMode=background-child-postmessage; coordinateMode=contain-centered; version={playbackVersion}");
             LogReplayEventSample(events);
             LogReplayChildWindows();
 
@@ -283,6 +283,33 @@ namespace CefFlashBrowser.FlashBrowser
         private StableReplayNativeMethods.POINT ResolveBrowserClientPoint(HostInputMemoryEvent item, int eventIndex, string reason)
         {
             var size = GetBrowserClientSize();
+            var recordedWidth = item.DeltaX;
+            var recordedHeight = item.DeltaY;
+            var hasRecordedSize = !string.Equals(item.Type, "wheel", StringComparison.OrdinalIgnoreCase)
+                && item.X.HasValue && item.Y.HasValue
+                && recordedWidth > 0 && recordedHeight > 0;
+
+            if (hasRecordedSize)
+            {
+                var scale = Math.Min(size.Width / recordedWidth, size.Height / recordedHeight);
+                if (double.IsNaN(scale) || double.IsInfinity(scale) || scale <= 0)
+                    scale = 1.0;
+
+                var contentWidth = recordedWidth * scale;
+                var contentHeight = recordedHeight * scale;
+                var offsetX = (size.Width - contentWidth) / 2.0;
+                var offsetY = (size.Height - contentHeight) / 2.0;
+                var x = offsetX + item.X.Value * scale;
+                var y = offsetY + item.Y.Value * scale;
+                var contain = new StableReplayNativeMethods.POINT
+                {
+                    X = ClampToClient((int)Math.Round(x), size.Width),
+                    Y = ClampToClient((int)Math.Round(y), size.Height)
+                };
+                FeatureDiagnostics.Log("InputMemory", $"resolve browser client; index={eventIndex}; reason={reason}; source=contain-centered; rawX={item.X}; rawY={item.Y}; recordedSize={recordedWidth:0}x{recordedHeight:0}; currentSize={size.Width}x{size.Height}; scale={scale:0.####}; offsetX={offsetX:0.##}; offsetY={offsetY:0.##}; clientX={contain.X}; clientY={contain.Y}; browserHwnd={BrowserHandle}");
+                return contain;
+            }
+
             if (item.RatioX.HasValue && item.RatioY.HasValue && size.Width > 0 && size.Height > 0)
             {
                 var ratio = new StableReplayNativeMethods.POINT
@@ -290,7 +317,7 @@ namespace CefFlashBrowser.FlashBrowser
                     X = ClampToClient((int)Math.Round(item.RatioX.Value * size.Width), size.Width),
                     Y = ClampToClient((int)Math.Round(item.RatioY.Value * size.Height), size.Height)
                 };
-                FeatureDiagnostics.Log("InputMemory", $"resolve browser client; index={eventIndex}; reason={reason}; source=ratio-adaptive; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; clientX={ratio.X}; clientY={ratio.Y}; browserClientSize={size.Width}x{size.Height}; browserHwnd={BrowserHandle}");
+                FeatureDiagnostics.Log("InputMemory", $"resolve browser client; index={eventIndex}; reason={reason}; source=ratio-fallback; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; clientX={ratio.X}; clientY={ratio.Y}; browserClientSize={size.Width}x{size.Height}; browserHwnd={BrowserHandle}");
                 return ratio;
             }
 
@@ -386,7 +413,7 @@ namespace CefFlashBrowser.FlashBrowser
         {
             var error = ok ? 0 : Marshal.GetLastWin32Error();
             var clientText = point.HasValue ? $"clientX={point.Value.X}; clientY={point.Value.Y};" : string.Empty;
-            FeatureDiagnostics.Log("InputMemory", $"post message; action={action}; index={eventIndex}; ok={ok}; error={error}; msg=0x{msg:X}; wParam={wParam}; lParam={lParam}; {clientText} rawX={item?.X}; rawY={item?.Y}; ratioX={item?.RatioX}; ratioY={item?.RatioY}; button={item?.Button}; target={target}; targetClass={targetClass}; targetRect={GetWindowRectText(target)}; browserHwnd={BrowserHandle}; browserRect={GetWindowRectText(BrowserHandle)}; {extra}");
+            FeatureDiagnostics.Log("InputMemory", $"post message; action={action}; index={eventIndex}; ok={ok}; error={error}; msg=0x{msg:X}; wParam={wParam}; lParam={lParam}; {clientText} rawX={item?.X}; rawY={item?.Y}; ratioX={item?.RatioX}; ratioY={item?.RatioY}; recordedSize={item?.DeltaX:0}x{item?.DeltaY:0}; button={item?.Button}; target={target}; targetClass={targetClass}; targetRect={GetWindowRectText(target)}; browserHwnd={BrowserHandle}; browserRect={GetWindowRectText(BrowserHandle)}; {extra}");
         }
 
         private void LogReplayWindowSnapshot(string title, string extra)
@@ -399,7 +426,7 @@ namespace CefFlashBrowser.FlashBrowser
             for (var i = 0; i < Math.Min(events.Count, 8); i++)
             {
                 var item = events[i];
-                FeatureDiagnostics.Log("InputMemory", $"replay sample; index={i}; type={item.Type}; time={item.Time:0}; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; button={item.Button}; key={item.KeyCode}; nativeKey={item.NativeKeyCode}");
+                FeatureDiagnostics.Log("InputMemory", $"replay sample; index={i}; type={item.Type}; time={item.Time:0}; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; recordedSize={item.DeltaX:0}x{item.DeltaY:0}; button={item.Button}; key={item.KeyCode}; nativeKey={item.NativeKeyCode}");
             }
             if (events.Count > 8)
                 FeatureDiagnostics.Log("InputMemory", $"replay sample truncated; total={events.Count}");
