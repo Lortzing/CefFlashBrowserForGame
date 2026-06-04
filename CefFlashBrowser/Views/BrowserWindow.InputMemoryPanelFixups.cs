@@ -14,6 +14,7 @@ namespace CefFlashBrowser.Views
 {
     public partial class BrowserWindow
     {
+        private const string InputMemoryRecordButtonTag = "InputMemoryRecordButton";
         private static readonly bool InputMemoryPanelFixupsRegistered = RegisterInputMemoryPanelFixups();
 
         private static bool RegisterInputMemoryPanelFixups()
@@ -51,7 +52,8 @@ namespace CefFlashBrowser.Views
                 RemoveInputMemoryPanelButton(topPanel, "停止并自动保存");
                 RemoveInputMemoryPanelButton(topPanel, "开始/停止录制");
 
-                var recordButton = CreateInputMemoryPanelButton(browser.IsInputMemoryRecording ? "停止录制并保存" : "开始录制");
+                var recordButton = CreateInputMemoryPanelButton(GetInputMemoryRecordButtonText());
+                recordButton.Tag = InputMemoryRecordButtonTag;
                 recordButton.Click += async delegate
                 {
                     if (browser.IsInputMemoryRecording)
@@ -64,7 +66,7 @@ namespace CefFlashBrowser.Views
                         SetInputMacroHint("键鼠精灵：开始录制");
                     }
 
-                    recordButton.Content = browser.IsInputMemoryRecording ? "停止录制并保存" : "开始录制";
+                    RefreshInputMemoryPanelRecordingButton();
                 };
                 topPanel.Children.Insert(0, recordButton);
 
@@ -93,7 +95,27 @@ namespace CefFlashBrowser.Views
                 };
             }
 
+            RefreshInputMemoryPanelRecordingButton();
             LogHelper.LogInfo("[InputMemory] input macro panel fixups applied");
+        }
+
+        private void RefreshInputMemoryPanelRecordingButton()
+        {
+            if (_inputMemoryPanel == null)
+                return;
+
+            var button = FindVisualChildren<Button>(_inputMemoryPanel)
+                .FirstOrDefault(item => string.Equals(item.Tag as string, InputMemoryRecordButtonTag, StringComparison.Ordinal));
+            if (button != null)
+            {
+                button.Content = GetInputMemoryRecordButtonText();
+                button.ToolTip = browser.IsInputMemoryRecording ? "停止录制并自动保存到默认脚本文件夹" : "开始记录键盘和鼠标操作";
+            }
+        }
+
+        private string GetInputMemoryRecordButtonText()
+        {
+            return browser != null && browser.IsInputMemoryRecording ? "停止录制并保存" : "开始录制";
         }
 
         private async System.Threading.Tasks.Task ImportInputMacroFileIntoDefaultFolderAsync(Window panel)
