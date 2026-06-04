@@ -131,6 +131,8 @@ namespace CefFlashBrowser.FlashBrowser
 
         private void RecordHookMouse(string type, int clientX, int clientY, int screenX, int screenY, int button, int buttons, int wheelDelta)
         {
+            var browserSize = GetBrowserClientSizeForMacroRecord();
+            var isWheel = string.Equals(type, "wheel", StringComparison.OrdinalIgnoreCase);
             var item = new HostInputMemoryEvent
             {
                 Type = type,
@@ -139,7 +141,8 @@ namespace CefFlashBrowser.FlashBrowser
                 Y = clientY,
                 Button = button,
                 Buttons = buttons,
-                DeltaY = wheelDelta,
+                DeltaX = isWheel ? 0 : browserSize.Width,
+                DeltaY = isWheel ? wheelDelta : browserSize.Height,
                 CtrlKey = IsVirtualKeyDown(HookNativeMethods.VK_CONTROL),
                 ShiftKey = IsVirtualKeyDown(HookNativeMethods.VK_SHIFT),
                 AltKey = IsVirtualKeyDown(HookNativeMethods.VK_MENU),
@@ -162,7 +165,19 @@ namespace CefFlashBrowser.FlashBrowser
             SetInputMemoryStatus($"正在录制，已记录 {InputMemoryEventCount} 个事件");
 
             if (InputMemoryEventCount == 1 || InputMemoryEventCount % 10 == 0)
-                FeatureDiagnostics.Log("InputMemory", $"native capture count={InputMemoryEventCount}; lastType={item.Type}; clientX={item.X}; clientY={item.Y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
+                FeatureDiagnostics.Log("InputMemory", $"native capture count={InputMemoryEventCount}; lastType={item.Type}; clientX={item.X}; clientY={item.Y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}; recordedSize={item.DeltaX:0}x{item.DeltaY:0}");
+        }
+
+        private BrowserClientSize GetBrowserClientSizeForMacroRecord()
+        {
+            if (BrowserHandle != IntPtr.Zero)
+            {
+                HookNativeMethods.RECT rect;
+                if (HookNativeMethods.GetClientRect(BrowserHandle, out rect))
+                    return new BrowserClientSize(Math.Max(1, rect.Right - rect.Left), Math.Max(1, rect.Bottom - rect.Top));
+            }
+
+            return new BrowserClientSize((int)Math.Max(1, ActualWidth), (int)Math.Max(1, ActualHeight));
         }
 
         private bool IsInputMemoryContextActive(bool requireCursorInsideBrowser, int? screenX = null, int? screenY = null)
@@ -219,6 +234,18 @@ namespace CefFlashBrowser.FlashBrowser
         private static bool IsVirtualKeyDown(int virtualKey)
         {
             return (HookNativeMethods.GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+        }
+
+        private readonly struct BrowserClientSize
+        {
+            public BrowserClientSize(int width, int height)
+            {
+                Width = width;
+                Height = height;
+            }
+
+            public int Width { get; }
+            public int Height { get; }
         }
 
         private delegate IntPtr LowLevelInputProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -295,6 +322,9 @@ namespace CefFlashBrowser.FlashBrowser
 
             [DllImport("user32.dll")]
             public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+            [DllImport("user32.dll")]
+            public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
 
             [StructLayout(LayoutKind.Sequential)]
             public struct RECT
