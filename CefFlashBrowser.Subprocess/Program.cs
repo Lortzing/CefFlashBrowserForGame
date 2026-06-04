@@ -55,6 +55,21 @@ namespace CefFlashBrowser.Subprocess
         {
             var processType = GetSwitchValue(args, "--type=");
 
+            if (!IsSpeedGearBackendForced())
+            {
+                if (string.Equals(processType, "ppapi", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(processType, "plugin", StringComparison.OrdinalIgnoreCase)
+                    || HasSwitch(args, "--ppapi-flash-args"))
+                {
+                    WriteDiagnostic("SpeedGear backend skipped for Flash plugin subprocess at default 1x. Set CEF_FLASH_BROWSER_SPEEDGEAR_FORCE_LOAD=1 to enable native speed gear backend.");
+                }
+                else if (string.Equals(processType, "renderer", StringComparison.OrdinalIgnoreCase))
+                {
+                    WriteDiagnostic("SpeedGear backend skipped for renderer subprocess to avoid CEF page zoom/repaint flicker");
+                }
+                return false;
+            }
+
             if (string.Equals(processType, "ppapi", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(processType, "plugin", StringComparison.OrdinalIgnoreCase))
             {
@@ -74,6 +89,14 @@ namespace CefFlashBrowser.Subprocess
             }
 
             return false;
+        }
+
+        private static bool IsSpeedGearBackendForced()
+        {
+            var value = Environment.GetEnvironmentVariable("CEF_FLASH_BROWSER_SPEEDGEAR_FORCE_LOAD");
+            return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string GetSwitchValue(string[] args, string prefix)
