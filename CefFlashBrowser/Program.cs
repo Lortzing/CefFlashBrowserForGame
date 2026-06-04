@@ -163,12 +163,11 @@ namespace CefFlashBrowser
                 CefSharpSettings.Proxy = new ProxyOptions(proxySettings.IP, proxySettings.Port, proxySettings.UserName, proxySettings.Password);
             }
 
-            if (GlobalData.Settings.DisableGpuAcceleration)
-            {
-                settings.CefCommandLineArgs["disable-gpu"] = "1";
-                settings.CefCommandLineArgs["disable-gpu-compositing"] = "1";
-                settings.CefCommandLineArgs["disable-gpu-vsync"] = "1";
-            }
+            settings.CefCommandLineArgs["disable-gpu"] = "1";
+            settings.CefCommandLineArgs["disable-gpu-compositing"] = "1";
+            settings.CefCommandLineArgs["disable-gpu-vsync"] = "1";
+            settings.CefCommandLineArgs["disable-accelerated-2d-canvas"] = "1";
+            settings.CefCommandLineArgs["disable-accelerated-video-decode"] = "1";
 
 #if !DEBUG
             settings.LogSeverity = LogSeverity.Error;
@@ -178,7 +177,7 @@ namespace CefFlashBrowser
             settings.CefCommandLineArgs["high-dpi-support"] = "1";
             settings.CefCommandLineArgs["enable-use-zoom-for-dsf"] = "1";
             Cef.Initialize(settings);
-            AppLogHelper.LogInfo($"CEF initialized. BrowserSubprocessPath={settings.BrowserSubprocessPath}, CachePath={settings.CachePath}, CefLogPath={settings.LogFile}, DpiScaleMode=adaptive-monitor");
+            AppLogHelper.LogInfo($"CEF initialized. BrowserSubprocessPath={settings.BrowserSubprocessPath}, CachePath={settings.CachePath}, CefLogPath={settings.LogFile}, DpiScaleMode=adaptive-monitor, GpuCompositing=disabled");
         }
 
         private static void OnFeatureDiagnosticMessageLogged(string message)
