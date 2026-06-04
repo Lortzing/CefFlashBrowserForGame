@@ -80,6 +80,7 @@ namespace CefFlashBrowser.Views
                 return IntPtr.Zero;
 
             handled = true;
+            LogHelper.LogInfo($"[InputMemory] WM_HOTKEY received; id={wParam.ToInt32()}");
             switch (wParam.ToInt32())
             {
                 case HOTKEY_RECORD:
@@ -101,17 +102,20 @@ namespace CefFlashBrowser.Views
             {
                 browser.StopInputMemoryPlayback();
                 SetInputMacroHint("键鼠精灵：已停止回放");
+                RefreshInputMemoryPanelRecordingButton();
                 return;
             }
 
             if (browser.IsInputMemoryRecording)
             {
                 await StopAndAutoSaveInputMacroAsync("快捷键停止录制");
+                RefreshInputMemoryPanelRecordingButton();
                 return;
             }
 
             browser.StartInputMemoryRecording();
             SetInputMacroHint("键鼠精灵：开始录制");
+            RefreshInputMemoryPanelRecordingButton();
             LogHelper.LogInfo("[InputMemory] hotkey start recording");
         }
 
@@ -120,6 +124,7 @@ namespace CefFlashBrowser.Views
             if (browser.IsInputMemoryRecording)
             {
                 await StopAndAutoSaveInputMacroAsync("快捷键停止录制");
+                RefreshInputMemoryPanelRecordingButton();
                 return;
             }
 
@@ -127,6 +132,7 @@ namespace CefFlashBrowser.Views
             {
                 browser.StopInputMemoryPlayback();
                 SetInputMacroHint("键鼠精灵：已停止回放");
+                RefreshInputMemoryPanelRecordingButton();
                 LogHelper.LogInfo("[InputMemory] hotkey stop playback");
             }
         }
@@ -136,6 +142,7 @@ namespace CefFlashBrowser.Views
             if (browser.IsInputMemoryRecording)
                 await StopAndAutoSaveInputMacroAsync("快捷键回放前自动保存");
 
+            RefreshInputMemoryPanelRecordingButton();
             if (!browser.IsInputMemoryPlaying)
             {
                 SetInputMacroHint("键鼠精灵：开始回放");
@@ -148,6 +155,7 @@ namespace CefFlashBrowser.Views
             if (browser == null)
                 return;
 
+            RefreshInputMemoryPanelRecordingButton();
             if (browser.IsInputMemoryRecording)
             {
                 _inputMacroWasRecording = true;
@@ -159,6 +167,7 @@ namespace CefFlashBrowser.Views
             {
                 _inputMacroWasRecording = false;
                 await AutoSaveCurrentInputMacroAsync("录制停止后自动保存");
+                RefreshInputMemoryPanelRecordingButton();
             }
             else if (!browser.IsInputMemoryPlaying && !string.IsNullOrEmpty(_inputMacroOriginalTitle) && Title.StartsWith("[键鼠录制中]", StringComparison.Ordinal))
             {
@@ -174,6 +183,7 @@ namespace CefFlashBrowser.Views
             browser.StopInputMemoryRecording();
             _inputMacroWasRecording = false;
             await AutoSaveCurrentInputMacroAsync(reason);
+            RefreshInputMemoryPanelRecordingButton();
         }
 
         private async Task AutoSaveCurrentInputMacroAsync(string reason)
@@ -239,24 +249,35 @@ namespace CefFlashBrowser.Views
 
         private void RegisterInputMacroHotkey(int id, string shortcut, string name)
         {
-            if (_hwnd == IntPtr.Zero || !TryParseInputMacroHotkey(shortcut, out var modifiers, out var virtualKey))
+            var hwnd = GetInputMacroHotkeyWindowHandle();
+            if (hwnd == IntPtr.Zero || !TryParseInputMacroHotkey(shortcut, out var modifiers, out var virtualKey))
             {
-                LogHelper.LogInfo($"[InputMemory] hotkey not registered; name={name}; shortcut={shortcut}");
+                LogHelper.LogInfo($"[InputMemory] hotkey not registered; name={name}; shortcut={shortcut}; hwnd={hwnd}");
                 return;
             }
 
-            var ok = RegisterHotKey(_hwnd, id, modifiers | MOD_NOREPEAT, virtualKey);
-            LogHelper.LogInfo($"[InputMemory] hotkey register; name={name}; shortcut={shortcut}; ok={ok}; error={(ok ? 0 : Marshal.GetLastWin32Error())}");
+            var ok = RegisterHotKey(hwnd, id, modifiers | MOD_NOREPEAT, virtualKey);
+            LogHelper.LogInfo($"[InputMemory] hotkey register; name={name}; shortcut={shortcut}; hwnd={hwnd}; ok={ok}; error={(ok ? 0 : Marshal.GetLastWin32Error())}");
         }
 
         private void UnregisterInputMacroHotkeys()
         {
-            if (_hwnd == IntPtr.Zero)
+            var hwnd = GetInputMacroHotkeyWindowHandle();
+            if (hwnd == IntPtr.Zero)
                 return;
 
-            UnregisterHotKey(_hwnd, HOTKEY_RECORD);
-            UnregisterHotKey(_hwnd, HOTKEY_REPLAY);
-            UnregisterHotKey(_hwnd, HOTKEY_STOP);
+            UnregisterHotKey(hwnd, HOTKEY_RECORD);
+            UnregisterHotKey(hwnd, HOTKEY_REPLAY);
+            UnregisterHotKey(hwnd, HOTKEY_STOP);
+        }
+
+        private IntPtr GetInputMacroHotkeyWindowHandle()
+        {
+            if (_inputMacroHotkeySource?.Handle != IntPtr.Zero)
+                return _inputMacroHotkeySource.Handle;
+            if (_hwnd != IntPtr.Zero)
+                return _hwnd;
+            return new WindowInteropHelper(this).Handle;
         }
 
         private static bool TryParseInputMacroHotkey(string shortcut, out uint modifiers, out uint virtualKey)
