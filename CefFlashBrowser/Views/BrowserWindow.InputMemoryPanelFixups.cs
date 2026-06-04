@@ -44,31 +44,26 @@ namespace CefFlashBrowser.Views
             if (wrapPanels.Count > 0)
             {
                 var topPanel = wrapPanels[0];
+                RemoveInputMemoryPanelButton(topPanel, "保存当前记录");
+                RemoveInputMemoryPanelButton(topPanel, "停止并自动保存");
+                RemoveInputMemoryPanelButton(topPanel, "开始/停止录制");
 
-                var recordButton = CreateInputMemoryPanelButton("开始/停止录制");
+                var recordButton = CreateInputMemoryPanelButton(browser.IsInputMemoryRecording ? "停止录制并保存" : "开始录制");
                 recordButton.Click += async delegate
                 {
                     if (browser.IsInputMemoryRecording)
                     {
-                        await StopAndAutoSaveInputMacroAsync("键鼠精灵窗口停止录制");
+                        await StopAndAutoSaveInputMacroAsync("键鼠精灵窗口停止录制并保存");
                     }
                     else
                     {
                         browser.StartInputMemoryRecording();
                         SetInputMacroHint("键鼠精灵：开始录制");
                     }
+
+                    recordButton.Content = browser.IsInputMemoryRecording ? "停止录制并保存" : "开始录制";
                 };
                 topPanel.Children.Insert(0, recordButton);
-
-                var stopSaveButton = CreateInputMemoryPanelButton("停止并自动保存");
-                stopSaveButton.Click += async delegate
-                {
-                    if (browser.IsInputMemoryRecording)
-                        await StopAndAutoSaveInputMacroAsync("键鼠精灵窗口停止并保存");
-                    else
-                        await AutoSaveCurrentInputMacroAsync("键鼠精灵窗口手动保存当前记录");
-                };
-                topPanel.Children.Insert(1, stopSaveButton);
             }
 
             var saveSettingsButton = FindVisualChildren<Button>(panel)
@@ -85,12 +80,23 @@ namespace CefFlashBrowser.Views
             LogHelper.LogInfo("[InputMemory] input macro panel fixups applied");
         }
 
+        private static void RemoveInputMemoryPanelButton(Panel panel, string text)
+        {
+            var buttons = panel.Children
+                .OfType<Button>()
+                .Where(button => string.Equals(button.Content as string, text, StringComparison.Ordinal))
+                .ToList();
+
+            foreach (var button in buttons)
+                panel.Children.Remove(button);
+        }
+
         private static Button CreateInputMemoryPanelButton(string text)
         {
             return new Button
             {
                 Content = text,
-                MinWidth = 96,
+                MinWidth = 112,
                 Height = 28,
                 Margin = new Thickness(0, 0, 8, 6),
                 Padding = new Thickness(8, 0, 8, 0)
