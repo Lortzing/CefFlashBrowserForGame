@@ -6,10 +6,6 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Shapes;
-using System.Windows.Threading;
 
 namespace CefFlashBrowser.FlashBrowser
 {
@@ -44,7 +40,7 @@ namespace CefFlashBrowser.FlashBrowser
             _inputMemoryLoopIndex = 0;
             _inputMemoryLoopTotal = loopCount;
 
-            FeatureDiagnostics.Log("InputMemory", $"stable replay started; count={events.Count}; speed={speed:0.###}; loopCount={loopCount}; loopIntervalMs={loopIntervalMs}");
+            FeatureDiagnostics.Log("InputMemory", $"stable replay started; count={events.Count}; speed={speed:0.###}; loopCount={loopCount}; loopIntervalMs={loopIntervalMs}; mouseMode=screen-sendinput");
 
             for (var i = countdownSeconds; i > 0; i--)
             {
@@ -65,6 +61,7 @@ namespace CefFlashBrowser.FlashBrowser
                 }
 
                 host.SetFocus(true);
+                FocusBrowserWindowForScreenReplay();
                 for (var loop = 0; loop < loops; loop++)
                 {
                     if (playbackVersion != _inputMemoryPlaybackVersion || !IsInputMemoryPlaying)
@@ -124,45 +121,35 @@ namespace CefFlashBrowser.FlashBrowser
             if (host == null || item == null)
                 return;
 
-            var clientPoint = ResolveStableClientPoint(item);
-            var screenPoint = ResolveStableScreenPoint(item, clientPoint);
             var modifiers = GetEventFlags(item);
-            var mouseEvent = new MouseEvent(clientPoint.X, clientPoint.Y, modifiers);
             var type = (item.Type ?? string.Empty).ToLowerInvariant();
 
             switch (type)
             {
                 case "mousemove":
-                    host.SendMouseMoveEvent(mouseEvent, false);
-                    break;
+                    {
+                        var clientPoint = ResolveStableClientPoint(item);
+                        host.SendMouseMoveEvent(new MouseEvent(clientPoint.X, clientPoint.Y, modifiers), false);
+                        break;
+                    }
                 case "mousedown":
-                    ShowStableReplayClickMarker(screenPoint.X, screenPoint.Y, false);
-                    FeatureDiagnostics.Log("InputMemory", $"stable replay marker; type=mousedown; clientX={clientPoint.X}; clientY={clientPoint.Y}; screenX={screenPoint.X}; screenY={screenPoint.Y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
-                    host.SendMouseMoveEvent(mouseEvent, false);
-                    host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), false, 1);
+                    SendScreenMouseEvent(item, false);
                     break;
                 case "mouseup":
-                    ShowStableReplayClickMarker(screenPoint.X, screenPoint.Y, true);
-                    FeatureDiagnostics.Log("InputMemory", $"stable replay marker; type=mouseup; clientX={clientPoint.X}; clientY={clientPoint.Y}; screenX={screenPoint.X}; screenY={screenPoint.Y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
-                    host.SendMouseMoveEvent(mouseEvent, false);
-                    host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), true, 1);
+                    SendScreenMouseEvent(item, true);
                     break;
                 case "click":
-                    ShowStableReplayClickMarker(screenPoint.X, screenPoint.Y, false);
-                    host.SendMouseMoveEvent(mouseEvent, false);
-                    host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), false, 1);
-                    host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), true, 1);
+                    SendScreenMouseEvent(item, false);
+                    SendScreenMouseEvent(item, true);
                     break;
                 case "dblclick":
-                    ShowStableReplayClickMarker(screenPoint.X, screenPoint.Y, false);
-                    host.SendMouseMoveEvent(mouseEvent, false);
-                    host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), false, 2);
-                    host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), true, 2);
+                    SendScreenMouseEvent(item, false);
+                    SendScreenMouseEvent(item, true);
+                    SendScreenMouseEvent(item, false);
+                    SendScreenMouseEvent(item, true);
                     break;
                 case "wheel":
-                    ShowStableReplayClickMarker(screenPoint.X, screenPoint.Y, true);
-                    host.SendMouseMoveEvent(mouseEvent, false);
-                    host.SendMouseWheelEvent(mouseEvent, (int)item.DeltaX, (int)item.DeltaY);
+                    SendScreenWheelEvent(item);
                     break;
                 case "keydown":
                     host.SendKeyEvent(CreateKeyEvent(item, KeyEventType.RawKeyDown, modifiers));
@@ -173,6 +160,48 @@ namespace CefFlashBrowser.FlashBrowser
                 case "char":
                     host.SendKeyEvent(CreateKeyEvent(item, KeyEventType.Char, modifiers));
                     break;
+            }
+        }
+
+        private void SendScreenMouseEvent(HostInputMemoryEvent item, bool mouseUp)
+        {
+            var screenPoint = ResolveStableScreenPoint(item, ResolveStableClientPoint(item));
+            ShowInputMemoryScreenMarker(screenPoint.X, screenPoint.Y, mouseUp, "replay");
+            StableReplayNativeMethods.SetCursorPos(screenPoint.X, screenPoint.Y);
+            var flags = GetScreenMouseFlags(item.Button, mouseUp);
+            StableReplayNativeMethods.mouse_event(flags, 0, 0, 0, UIntPtr.Zero);
+            FeatureDiagnostics.Log("InputMemory", $"stable replay screen mouse; type={(mouseUp ? "mouseup" : "mousedown")}; screenX={screenPoint.X}; screenY={screenPoint.Y}; button={item.Button}");
+        }
+
+        private void SendScreenWheelEvent(HostInputMemoryEvent item)
+        {
+            var screenPoint = ResolveStableScreenPoint(item, ResolveStableClientPoint(item));
+            ShowInputMemoryScreenMarker(screenPoint.X, screenPoint.Y, true, "replay");
+            StableReplayNativeMethods.SetCursorPos(screenPoint.X, screenPoint.Y);
+            StableReplayNativeMethods.mouse_event(StableReplayNativeMethods.MOUSEEVENTF_WHEEL, 0, 0, unchecked((uint)(int)item.DeltaY), UIntPtr.Zero);
+            FeatureDiagnostics.Log("InputMemory", $"stable replay screen wheel; screenX={screenPoint.X}; screenY={screenPoint.Y}; delta={item.DeltaY}");
+        }
+
+        private void FocusBrowserWindowForScreenReplay()
+        {
+            if (BrowserHandle != IntPtr.Zero)
+            {
+                StableReplayNativeMethods.SetForegroundWindow(BrowserHandle);
+                StableReplayNativeMethods.SetFocus(BrowserHandle);
+                FeatureDiagnostics.Log("InputMemory", $"stable replay focus browser handle={BrowserHandle}");
+            }
+        }
+
+        private static uint GetScreenMouseFlags(int? button, bool mouseUp)
+        {
+            switch (button ?? 0)
+            {
+                case 1:
+                    return mouseUp ? StableReplayNativeMethods.MOUSEEVENTF_MIDDLEUP : StableReplayNativeMethods.MOUSEEVENTF_MIDDLEDOWN;
+                case 2:
+                    return mouseUp ? StableReplayNativeMethods.MOUSEEVENTF_RIGHTUP : StableReplayNativeMethods.MOUSEEVENTF_RIGHTDOWN;
+                default:
+                    return mouseUp ? StableReplayNativeMethods.MOUSEEVENTF_LEFTUP : StableReplayNativeMethods.MOUSEEVENTF_LEFTDOWN;
             }
         }
 
@@ -266,50 +295,6 @@ namespace CefFlashBrowser.FlashBrowser
                 item.RatioY = Math.Max(0, Math.Min(1, item.Y.Value / size.Height));
         }
 
-        private void ShowStableReplayClickMarker(int screenX, int screenY, bool release)
-        {
-            const int size = 28;
-            var window = new Window
-            {
-                Width = size,
-                Height = size,
-                Left = screenX - size / 2.0,
-                Top = screenY - size / 2.0,
-                WindowStyle = WindowStyle.None,
-                AllowsTransparency = true,
-                Background = Brushes.Transparent,
-                Topmost = true,
-                ShowInTaskbar = false,
-                ShowActivated = false,
-                IsHitTestVisible = false,
-                Content = new Grid
-                {
-                    Children =
-                    {
-                        new Ellipse
-                        {
-                            Stroke = release ? Brushes.DeepSkyBlue : Brushes.Red,
-                            StrokeThickness = 3,
-                            Fill = Brushes.Transparent,
-                            Width = size - 4,
-                            Height = size - 4,
-                            HorizontalAlignment = HorizontalAlignment.Center,
-                            VerticalAlignment = VerticalAlignment.Center
-                        }
-                    }
-                }
-            };
-
-            window.Show();
-            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(360) };
-            timer.Tick += delegate
-            {
-                timer.Stop();
-                window.Close();
-            };
-            timer.Start();
-        }
-
         private readonly struct BrowserClientSize
         {
             public BrowserClientSize(int width, int height)
@@ -324,6 +309,14 @@ namespace CefFlashBrowser.FlashBrowser
 
         private static class StableReplayNativeMethods
         {
+            public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+            public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+            public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+            public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+            public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+            public const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
+            public const uint MOUSEEVENTF_WHEEL = 0x0800;
+
             [DllImport("user32.dll")]
             public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
 
@@ -332,6 +325,18 @@ namespace CefFlashBrowser.FlashBrowser
 
             [DllImport("user32.dll")]
             public static extern bool ScreenToClient(IntPtr hwnd, ref POINT point);
+
+            [DllImport("user32.dll")]
+            public static extern bool SetCursorPos(int X, int Y);
+
+            [DllImport("user32.dll")]
+            public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+
+            [DllImport("user32.dll")]
+            public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+            [DllImport("user32.dll")]
+            public static extern IntPtr SetFocus(IntPtr hWnd);
 
             [StructLayout(LayoutKind.Sequential)]
             public struct POINT
