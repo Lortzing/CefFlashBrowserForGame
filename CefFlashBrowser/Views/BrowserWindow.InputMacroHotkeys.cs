@@ -131,7 +131,12 @@ namespace CefFlashBrowser.Views
             }
 
             SetInputMacroHint("键鼠精灵：开始播放");
-            await ReplaySelectedInputMacroAsync();
+            if (!string.IsNullOrWhiteSpace(_selectedInputMacroPath))
+                await LoadInputMemoryMacroAsync(_selectedInputMacroPath);
+            await browser.ReplayInputMemoryStableAsync(
+                loopCount: GlobalData.Settings.InputMacroLoopUntilStopped ? 0 : Math.Max(1, GlobalData.Settings.InputMacroReplayCount),
+                loopIntervalMs: 1000,
+                countdownSeconds: 0);
             RefreshInputMemoryPanelRecordingButton();
         }
 
