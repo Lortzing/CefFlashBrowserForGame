@@ -15,6 +15,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using AppLogHelper = CefFlashBrowser.Utils.LogHelper;
 
 namespace CefFlashBrowser
 {
@@ -46,13 +47,13 @@ namespace CefFlashBrowser
                     LanguageManager.InitLanguage();
 
                     var cts = new CancellationTokenSource();
-                    var delLogsTask = LogHelper.DeleteExpiredLogsAsync(cts.Token);
+                    var delLogsTask = AppLogHelper.DeleteExpiredLogsAsync(cts.Token);
 
                     InitCefFlash();
                     InitTheme();
 
-                    LogHelper.LogInfo($"Application started successfully, pid: {Process.GetCurrentProcess().Id}");
-                    LogHelper.LogInfo($"CefFlashBrowser Version: {Assembly.GetExecutingAssembly().GetName().Version}");
+                    AppLogHelper.LogInfo($"Application started successfully, pid: {Process.GetCurrentProcess().Id}");
+                    AppLogHelper.LogInfo($"CefFlashBrowser Version: {Assembly.GetExecutingAssembly().GetName().Version}");
 
                     app.Run();
                     cts.Cancel();
@@ -61,13 +62,13 @@ namespace CefFlashBrowser
                 else
                 {
                     string json = JsonConvert.SerializeObject(args);
-                    LogHelper.LogInfo($"Another instance is running, send args to it: {json}");
+                    AppLogHelper.LogInfo($"Another instance is running, send args to it: {json}");
                     MsgReceiver.SendGlobalData(Encoding.UTF8.GetBytes(json));
                 }
             }
             catch (Exception e)
             {
-                LogHelper.LogWtf("Unhandled exception in Main method", e);
+                AppLogHelper.LogWtf("Unhandled exception in Main method", e);
                 WindowManager.ShowError(e.Message);
             }
             finally
@@ -80,7 +81,7 @@ namespace CefFlashBrowser
         private static void WaitAllTask(params Task[] tasks)
         {
             try { Task.WaitAll(tasks); }
-            catch (Exception e) { LogHelper.LogError("Exception occurred while waiting for tasks", e); }
+            catch (Exception e) { AppLogHelper.LogError("Exception occurred while waiting for tasks", e); }
         }
 
         private static void InitTheme()
@@ -128,16 +129,16 @@ namespace CefFlashBrowser
             if (nativeSpeedGearEnabled && File.Exists(appSubprocessPath) && File.Exists(speedGearPath))
             {
                 settings.BrowserSubprocessPath = appSubprocessPath;
-                LogHelper.LogInfo($"SpeedGear native backend enabled. BrowserSubprocessPath={appSubprocessPath}");
+                AppLogHelper.LogInfo($"SpeedGear native backend enabled. BrowserSubprocessPath={appSubprocessPath}");
             }
             else if (nativeSpeedGearEnabled)
             {
-                LogHelper.LogError(
+                AppLogHelper.LogError(
                     $"SpeedGear backend files not found, falling back to default CefSharp subprocess. Subprocess: {appSubprocessPath}, SpeedGear: {speedGearPath}");
             }
             else
             {
-                LogHelper.LogInfo("SpeedGear native backend disabled. Using stock CefSharp browser subprocess; speed factor changes will not hook CEF subprocess time APIs.");
+                AppLogHelper.LogInfo("SpeedGear native backend disabled. Using stock CefSharp browser subprocess; speed factor changes will not hook CEF subprocess time APIs.");
             }
 
             RuntimeDiagnostics.StartSpeedGearProbe(settings.BrowserSubprocessPath, speedGearPath, nativeSpeedGearEnabled);
@@ -175,14 +176,14 @@ namespace CefFlashBrowser
 
             settings.CefCommandLineArgs["autoplay-policy"] = "no-user-gesture-required";
             Cef.Initialize(settings);
-            LogHelper.LogInfo($"CEF initialized. BrowserSubprocessPath={settings.BrowserSubprocessPath}, CachePath={settings.CachePath}, CefLogPath={settings.LogFile}");
+            AppLogHelper.LogInfo($"CEF initialized. BrowserSubprocessPath={settings.BrowserSubprocessPath}, CachePath={settings.CachePath}, CefLogPath={settings.LogFile}");
         }
 
         private static void OnFeatureDiagnosticMessageLogged(string message)
         {
             try
             {
-                LogHelper.LogInfo(message);
+                AppLogHelper.LogInfo(message);
             }
             catch
             {
@@ -215,12 +216,12 @@ namespace CefFlashBrowser
 
             if (_restart)
             {
-                LogHelper.LogInfo("Restarting application...");
+                AppLogHelper.LogInfo("Restarting application...");
                 Process.Start(Process.GetCurrentProcess().MainModule.FileName);
             }
             else
             {
-                LogHelper.LogInfo($"Application terminated, pid: {Process.GetCurrentProcess().Id}");
+                AppLogHelper.LogInfo($"Application terminated, pid: {Process.GetCurrentProcess().Id}");
             }
         }
 
