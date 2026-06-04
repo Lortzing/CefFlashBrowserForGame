@@ -41,7 +41,7 @@ namespace CefFlashBrowser.FlashBrowser
             _inputMemoryLoopIndex = 0;
             _inputMemoryLoopTotal = loopCount;
 
-            LogReplayWindowSnapshot("stable replay started", $"count={events.Count}; speed={speed:0.###}; loopCount={loopCount}; loopIntervalMs={loopIntervalMs}; mouseMode=background-child-postmessage; version={playbackVersion}");
+            LogReplayWindowSnapshot("stable replay started", $"count={events.Count}; speed={speed:0.###}; loopCount={loopCount}; loopIntervalMs={loopIntervalMs}; mouseMode=background-child-postmessage; coordinateMode=ratio-adaptive; version={playbackVersion}");
             LogReplayEventSample(events);
             LogReplayChildWindows();
 
@@ -252,8 +252,6 @@ namespace CefFlashBrowser.FlashBrowser
 
         private static bool IsInputMacroControlVirtualKey(int vk)
         {
-            // Default playback hotkey observed in logs is F2 (VK_F2 = 113). Skipping it prevents
-            // recorded start/stop hotkey events from stopping looped replay after the first iteration.
             return vk == 113;
         }
 
@@ -285,17 +283,6 @@ namespace CefFlashBrowser.FlashBrowser
         private StableReplayNativeMethods.POINT ResolveBrowserClientPoint(HostInputMemoryEvent item, int eventIndex, string reason)
         {
             var size = GetBrowserClientSize();
-            if (item.X.HasValue && item.Y.HasValue)
-            {
-                var direct = new StableReplayNativeMethods.POINT
-                {
-                    X = ClampToClient((int)Math.Round(item.X.Value), size.Width),
-                    Y = ClampToClient((int)Math.Round(item.Y.Value), size.Height)
-                };
-                FeatureDiagnostics.Log("InputMemory", $"resolve browser client; index={eventIndex}; reason={reason}; source=direct-client-x-y; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; clientX={direct.X}; clientY={direct.Y}; browserClientSize={size.Width}x{size.Height}; browserHwnd={BrowserHandle}");
-                return direct;
-            }
-
             if (item.RatioX.HasValue && item.RatioY.HasValue && size.Width > 0 && size.Height > 0)
             {
                 var ratio = new StableReplayNativeMethods.POINT
@@ -303,8 +290,19 @@ namespace CefFlashBrowser.FlashBrowser
                     X = ClampToClient((int)Math.Round(item.RatioX.Value * size.Width), size.Width),
                     Y = ClampToClient((int)Math.Round(item.RatioY.Value * size.Height), size.Height)
                 };
-                FeatureDiagnostics.Log("InputMemory", $"resolve browser client; index={eventIndex}; reason={reason}; source=ratio-fallback; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; clientX={ratio.X}; clientY={ratio.Y}; browserClientSize={size.Width}x{size.Height}; browserHwnd={BrowserHandle}");
+                FeatureDiagnostics.Log("InputMemory", $"resolve browser client; index={eventIndex}; reason={reason}; source=ratio-adaptive; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; clientX={ratio.X}; clientY={ratio.Y}; browserClientSize={size.Width}x{size.Height}; browserHwnd={BrowserHandle}");
                 return ratio;
+            }
+
+            if (item.X.HasValue && item.Y.HasValue)
+            {
+                var direct = new StableReplayNativeMethods.POINT
+                {
+                    X = ClampToClient((int)Math.Round(item.X.Value), size.Width),
+                    Y = ClampToClient((int)Math.Round(item.Y.Value), size.Height)
+                };
+                FeatureDiagnostics.Log("InputMemory", $"resolve browser client; index={eventIndex}; reason={reason}; source=direct-client-x-y-fallback; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; clientX={direct.X}; clientY={direct.Y}; browserClientSize={size.Width}x{size.Height}; browserHwnd={BrowserHandle}");
+                return direct;
             }
 
             FeatureDiagnostics.Log("InputMemory", $"resolve browser client; index={eventIndex}; reason={reason}; source=empty; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; browserClientSize={size.Width}x{size.Height}; browserHwnd={BrowserHandle}");
