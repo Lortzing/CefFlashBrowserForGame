@@ -78,17 +78,20 @@ namespace CefFlashBrowser.FlashBrowser
                 var info = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
                 if (IsInputMemoryContextActive(true, info.pt.X, info.pt.Y))
                 {
-					var msg = wParam.ToInt32();
-					var x = info.pt.X;
-					var y = info.pt.Y;
-					RecordMouseHookMessage(msg, x, y, info.mouseData);
+                    var msg = wParam.ToInt32();
+                    var screenX = info.pt.X;
+                    var screenY = info.pt.Y;
+                    var clientX = screenX;
+                    var clientY = screenY;
+                    ConvertScreenToBrowserClientPoint(ref clientX, ref clientY);
+                    RecordMouseHookMessage(msg, clientX, clientY, screenX, screenY, info.mouseData);
                 }
             }
 
             return HookNativeMethods.CallNextHookEx(_mouseHook, code, wParam, lParam);
         }
 
-        private void RecordMouseHookMessage(int msg, int x, int y, uint mouseData)
+        private void RecordMouseHookMessage(int msg, int clientX, int clientY, int screenX, int screenY, uint mouseData)
         {
             switch (msg)
             {
@@ -97,58 +100,57 @@ namespace CefFlashBrowser.FlashBrowser
 
                 case HookNativeMethods.WM_LBUTTONDOWN:
                     _hookLastButtons |= 1;
-                    RecordHookMouse("mousedown", x, y, 0, _hookLastButtons, 0);
+                    RecordHookMouse("mousedown", clientX, clientY, screenX, screenY, 0, _hookLastButtons, 0);
                     break;
                 case HookNativeMethods.WM_LBUTTONUP:
                     _hookLastButtons &= ~1;
-                    RecordHookMouse("mouseup", x, y, 0, _hookLastButtons, 0);
+                    RecordHookMouse("mouseup", clientX, clientY, screenX, screenY, 0, _hookLastButtons, 0);
                     break;
                 case HookNativeMethods.WM_RBUTTONDOWN:
                     _hookLastButtons |= 2;
-                    RecordHookMouse("mousedown", x, y, 2, _hookLastButtons, 0);
+                    RecordHookMouse("mousedown", clientX, clientY, screenX, screenY, 2, _hookLastButtons, 0);
                     break;
                 case HookNativeMethods.WM_RBUTTONUP:
                     _hookLastButtons &= ~2;
-                    RecordHookMouse("mouseup", x, y, 2, _hookLastButtons, 0);
+                    RecordHookMouse("mouseup", clientX, clientY, screenX, screenY, 2, _hookLastButtons, 0);
                     break;
                 case HookNativeMethods.WM_MBUTTONDOWN:
                     _hookLastButtons |= 4;
-                    RecordHookMouse("mousedown", x, y, 1, _hookLastButtons, 0);
+                    RecordHookMouse("mousedown", clientX, clientY, screenX, screenY, 1, _hookLastButtons, 0);
                     break;
                 case HookNativeMethods.WM_MBUTTONUP:
                     _hookLastButtons &= ~4;
-                    RecordHookMouse("mouseup", x, y, 1, _hookLastButtons, 0);
+                    RecordHookMouse("mouseup", clientX, clientY, screenX, screenY, 1, _hookLastButtons, 0);
                     break;
                 case HookNativeMethods.WM_MOUSEWHEEL:
                     var delta = unchecked((short)((mouseData >> 16) & 0xffff));
-                    RecordHookMouse("wheel", x, y, 0, _hookLastButtons, delta);
+                    RecordHookMouse("wheel", clientX, clientY, screenX, screenY, 0, _hookLastButtons, delta);
                     break;
             }
         }
 
-        private void RecordHookMouse(string type, int x, int y, int button, int buttons, int wheelDelta)
-		{
-			var item = new HostInputMemoryEvent
-			{
-				Type = type,
-				Time = _inputMemoryStopwatch.Elapsed.TotalMilliseconds,
-				X = x,
-				Y = y,
-				Button = button,
-				Buttons = buttons,
-				DeltaY = wheelDelta,
-				CtrlKey = IsVirtualKeyDown(HookNativeMethods.VK_CONTROL),
-				ShiftKey = IsVirtualKeyDown(HookNativeMethods.VK_SHIFT),
-				AltKey = IsVirtualKeyDown(HookNativeMethods.VK_MENU),
-				MetaKey = IsVirtualKeyDown(HookNativeMethods.VK_LWIN) || IsVirtualKeyDown(HookNativeMethods.VK_RWIN)
-			};
-
-			ShowInputMemoryScreenMarker(x, y,
-				string.Equals(type, "mouseup", StringComparison.OrdinalIgnoreCase),
-				"record");
-
-			RecordHookInput(item);
-		}
+        private void RecordHookMouse(string type, int clientX, int clientY, int screenX, int screenY, int button, int buttons, int wheelDelta)
+        {
+            var item = new HostInputMemoryEvent
+            {
+                Type = type,
+                Time = _inputMemoryStopwatch.Elapsed.TotalMilliseconds,
+                X = clientX,
+                Y = clientY,
+                Button = button,
+                Buttons = buttons,
+                DeltaY = wheelDelta,
+                CtrlKey = IsVirtualKeyDown(HookNativeMethods.VK_CONTROL),
+                ShiftKey = IsVirtualKeyDown(HookNativeMethods.VK_SHIFT),
+                AltKey = IsVirtualKeyDown(HookNativeMethods.VK_MENU),
+                MetaKey = IsVirtualKeyDown(HookNativeMethods.VK_LWIN) || IsVirtualKeyDown(HookNativeMethods.VK_RWIN)
+            };
+            FillBrowserRatios(item);
+            ShowInputMemoryScreenMarker(screenX, screenY,
+                string.Equals(type, "mouseup", StringComparison.OrdinalIgnoreCase),
+                "record");
+            RecordHookInput(item);
+        }
 
         private void RecordHookInput(HostInputMemoryEvent item)
         {
@@ -160,7 +162,7 @@ namespace CefFlashBrowser.FlashBrowser
             SetInputMemoryStatus($"正在录制，已记录 {InputMemoryEventCount} 个事件");
 
             if (InputMemoryEventCount == 1 || InputMemoryEventCount % 10 == 0)
-                FeatureDiagnostics.Log("InputMemory", $"native capture count={InputMemoryEventCount}; lastType={item.Type}; x={item.X}; y={item.Y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
+                FeatureDiagnostics.Log("InputMemory", $"native capture count={InputMemoryEventCount}; lastType={item.Type}; clientX={item.X}; clientY={item.Y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
         }
 
         private bool IsInputMemoryContextActive(bool requireCursorInsideBrowser, int? screenX = null, int? screenY = null)
