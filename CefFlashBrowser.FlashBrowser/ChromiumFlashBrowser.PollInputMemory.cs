@@ -78,11 +78,10 @@ namespace CefFlashBrowser.FlashBrowser
                 var info = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
                 if (IsInputMemoryContextActive(true, info.pt.X, info.pt.Y))
                 {
-                    var msg = wParam.ToInt32();
-                    var x = info.pt.X;
-                    var y = info.pt.Y;
-                    ConvertScreenToBrowserClientPoint(ref x, ref y);
-                    RecordMouseHookMessage(msg, x, y, info.mouseData);
+					var msg = wParam.ToInt32();
+					var x = info.pt.X;
+					var y = info.pt.Y;
+					RecordMouseHookMessage(msg, x, y, info.mouseData);
                 }
             }
 
@@ -143,7 +142,6 @@ namespace CefFlashBrowser.FlashBrowser
                 AltKey = IsVirtualKeyDown(HookNativeMethods.VK_MENU),
                 MetaKey = IsVirtualKeyDown(HookNativeMethods.VK_LWIN) || IsVirtualKeyDown(HookNativeMethods.VK_RWIN)
             };
-            FillBrowserRatios(item);
             RecordHookInput(item);
         }
 
