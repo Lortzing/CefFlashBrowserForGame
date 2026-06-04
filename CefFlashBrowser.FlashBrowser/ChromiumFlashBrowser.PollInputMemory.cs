@@ -236,18 +236,6 @@ namespace CefFlashBrowser.FlashBrowser
             return (HookNativeMethods.GetAsyncKeyState(virtualKey) & 0x8000) != 0;
         }
 
-        private readonly struct BrowserClientSize
-        {
-            public BrowserClientSize(int width, int height)
-            {
-                Width = width;
-                Height = height;
-            }
-
-            public int Width { get; }
-            public int Height { get; }
-        }
-
         private delegate IntPtr LowLevelInputProc(int nCode, IntPtr wParam, IntPtr lParam);
 
         [StructLayout(LayoutKind.Sequential)]
