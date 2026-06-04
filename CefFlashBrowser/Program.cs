@@ -1,4 +1,5 @@
 ﻿using CefFlashBrowser.Data;
+using CefFlashBrowser.Diagnostics;
 using CefFlashBrowser.FlashBrowser;
 using CefFlashBrowser.Log;
 using CefFlashBrowser.Singleton;
@@ -138,6 +139,8 @@ namespace CefFlashBrowser
             {
                 LogHelper.LogInfo("SpeedGear native backend disabled. Using stock CefSharp browser subprocess; speed factor changes will not hook CEF subprocess time APIs.");
             }
+
+            RuntimeDiagnostics.StartSpeedGearProbe(settings.BrowserSubprocessPath, speedGearPath, nativeSpeedGearEnabled);
 
             if (GlobalData.Settings.FakeFlashVersionSetting.Enable)
             {
