@@ -55,22 +55,25 @@ namespace CefFlashBrowser.Subprocess
         {
             var processType = GetSwitchValue(args, "--type=");
 
-            if (string.Equals(processType, "gpu-process", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(processType, "utility", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-
-            if (string.Equals(processType, "renderer", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(processType, "ppapi", StringComparison.OrdinalIgnoreCase)
+            if (string.Equals(processType, "ppapi", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(processType, "plugin", StringComparison.OrdinalIgnoreCase))
             {
+                WriteDiagnostic("SpeedGear backend selected for Flash plugin subprocess type=" + processType);
                 return true;
             }
 
-            return HasSwitch(args, "--ppapi-flash-args")
-                || HasSwitch(args, "--ppapi-flash-path")
-                || HasSwitch(args, "--ppapi-flash-version");
+            if (HasSwitch(args, "--ppapi-flash-args"))
+            {
+                WriteDiagnostic("SpeedGear backend selected by --ppapi-flash-args");
+                return true;
+            }
+
+            if (string.Equals(processType, "renderer", StringComparison.OrdinalIgnoreCase))
+            {
+                WriteDiagnostic("SpeedGear backend skipped for renderer subprocess to avoid CEF page zoom/repaint flicker");
+            }
+
+            return false;
         }
 
         private static string GetSwitchValue(string[] args, string prefix)
@@ -125,15 +128,15 @@ namespace CefFlashBrowser.Subprocess
             var module = LoadLibrary(path);
             if (module == IntPtr.Zero)
             {
-                WriteDiagnostic("failed to load SpeedGear backend DLL: " + path);
+                WriteDiagnostic("failed to load SpeedGear backend DLL: " + path + " error=" + Marshal.GetLastWin32Error());
                 return false;
             }
 
             var initializeAddress = GetProcAddress(module, "CefFlashBrowserSpeedGearInitialize");
             if (initializeAddress == IntPtr.Zero)
             {
-                WriteDiagnostic("SpeedGear initialize export not found: " + path);
-                return false;
+                WriteDiagnostic("SpeedGear initialize export not found; DLL loaded and DllMain fallback will be used: " + path);
+                return true;
             }
 
             var initialize = (SpeedGearInitializeDelegate)Marshal.GetDelegateForFunctionPointer(
