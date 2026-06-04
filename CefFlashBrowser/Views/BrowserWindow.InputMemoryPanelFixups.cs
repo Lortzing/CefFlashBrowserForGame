@@ -70,11 +70,13 @@ namespace CefFlashBrowser.Views
                 {
                     if (browser.IsInputMemoryRecording)
                     {
+                        browser.StopInputMemoryNativeCapture();
                         await StopAndAutoSaveInputMacroAsync("键鼠精灵窗口停止录制并保存");
                     }
                     else
                     {
                         browser.StartInputMemoryRecording();
+                        browser.StartInputMemoryNativeCapture();
                         SetInputMacroHint("键鼠精灵：开始录制");
                     }
 
