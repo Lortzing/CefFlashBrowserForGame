@@ -187,7 +187,7 @@ namespace CefFlashBrowser.FlashBrowser
 
         private void SendBackgroundKey(HostInputMemoryEvent item, bool keyUp)
         {
-            var vk = item.KeyCode ?? item.NativeKeyCode ?? 0;
+            var vk = item.KeyCode > 0 ? item.KeyCode : item.NativeKeyCode;
             if (vk <= 0)
                 return;
 
@@ -198,7 +198,7 @@ namespace CefFlashBrowser.FlashBrowser
 
         private void SendBackgroundChar(HostInputMemoryEvent item)
         {
-            var vk = item.KeyCode ?? item.NativeKeyCode ?? 0;
+            var vk = item.KeyCode > 0 ? item.KeyCode : item.NativeKeyCode;
             if (vk <= 0)
                 return;
 
