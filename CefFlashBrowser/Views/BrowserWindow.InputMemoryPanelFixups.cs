@@ -1,7 +1,10 @@
 using CefFlashBrowser.Data;
 using CefFlashBrowser.Utils;
+using CefFlashBrowser.Utils.InputMacros;
+using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -64,6 +67,19 @@ namespace CefFlashBrowser.Views
                     recordButton.Content = browser.IsInputMemoryRecording ? "停止录制并保存" : "开始录制";
                 };
                 topPanel.Children.Insert(0, recordButton);
+
+                var loadButton = topPanel.Children
+                    .OfType<Button>()
+                    .FirstOrDefault(button => string.Equals(button.Content as string, "载入", StringComparison.Ordinal));
+                if (loadButton != null)
+                {
+                    loadButton.ToolTip = "从任意文件夹选择键鼠脚本，并复制到默认脚本文件夹后载入";
+                    loadButton.PreviewMouseLeftButtonDown += async delegate(object sender, MouseButtonEventArgs args)
+                    {
+                        args.Handled = true;
+                        await ImportInputMacroFileIntoDefaultFolderAsync(panel);
+                    };
+                }
             }
 
             var saveSettingsButton = FindVisualChildren<Button>(panel)
@@ -78,6 +94,70 @@ namespace CefFlashBrowser.Views
             }
 
             LogHelper.LogInfo("[InputMemory] input macro panel fixups applied");
+        }
+
+        private async System.Threading.Tasks.Task ImportInputMacroFileIntoDefaultFolderAsync(Window panel)
+        {
+            try
+            {
+                Directory.CreateDirectory(InputMacroService.DirectoryPath);
+                var dialog = new OpenFileDialog
+                {
+                    InitialDirectory = Directory.Exists(InputMacroService.DirectoryPath)
+                        ? InputMacroService.DirectoryPath
+                        : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                    Filter = "键鼠脚本|*.json|所有文件|*.*",
+                    CheckFileExists = true,
+                    Multiselect = false,
+                    Title = "选择要载入的键鼠脚本"
+                };
+
+                if (dialog.ShowDialog(panel) != true)
+                    return;
+
+                var sourcePath = dialog.FileName;
+                var macro = InputMacroService.Load(sourcePath);
+                var importedPath = InputMacroService.Save(macro);
+                await LoadInputMemoryMacroAsync(importedPath);
+                _selectedInputMacroPath = importedPath;
+
+                RefreshInputMemoryPanelList(panel, importedPath);
+                WindowManager.Alert($"已载入并复制到默认文件夹：{Path.GetFileName(importedPath)}（{macro.Events.Count} 个事件）", "键鼠精灵");
+                LogHelper.LogInfo($"[InputMemory] imported macro; source={sourcePath}; target={importedPath}; count={macro.Events.Count}");
+            }
+            catch (Exception e)
+            {
+                LogHelper.LogError("[InputMemory] failed to import input macro file", e);
+                WindowManager.ShowError(e.Message);
+            }
+        }
+
+        private static void RefreshInputMemoryPanelList(Window panel, string selectedPath)
+        {
+            var listBox = FindVisualChildren<ListBox>(panel).FirstOrDefault();
+            if (listBox == null)
+                return;
+
+            if (listBox.ItemsSource is System.Collections.IList items)
+            {
+                items.Clear();
+                foreach (var macro in InputMacroService.ListSavedMacros())
+                    items.Add(macro);
+            }
+
+            foreach (var item in listBox.Items)
+            {
+                if (item is InputMacroFile macroFile
+                    && string.Equals(macroFile.Path, selectedPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    listBox.SelectedItem = item;
+                    listBox.ScrollIntoView(item);
+                    return;
+                }
+            }
+
+            if (listBox.Items.Count > 0 && listBox.SelectedItem == null)
+                listBox.SelectedIndex = 0;
         }
 
         private static void RemoveInputMemoryPanelButton(Panel panel, string text)
