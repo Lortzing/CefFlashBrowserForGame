@@ -15,6 +15,12 @@ namespace CefFlashBrowser.Views
     public partial class BrowserWindow
     {
         private const string InputMemoryRecordButtonTag = "InputMemoryRecordButton";
+        private const string InputMemoryPlaybackButtonTag = "InputMemoryPlaybackButton";
+        private const string InputMemoryReplayCountBoxTag = "InputMemoryReplayCountBox";
+        private const string InputMemoryReplayCountModeTag = "InputMemoryReplayCountMode";
+        private const string InputMemoryReplayLoopModeTag = "InputMemoryReplayLoopMode";
+        private const string InputMemoryRecordShortcutBoxTag = "InputMemoryRecordShortcutBox";
+        private const string InputMemoryPlaybackShortcutBoxTag = "InputMemoryPlaybackShortcutBox";
         private static readonly bool InputMemoryPanelFixupsRegistered = RegisterInputMemoryPanelFixups();
 
         private static bool RegisterInputMemoryPanelFixups()
@@ -47,12 +53,34 @@ namespace CefFlashBrowser.Views
             var wrapPanels = FindVisualChildren<WrapPanel>(panel).ToList();
             if (wrapPanels.Count > 0)
             {
-                var topPanel = wrapPanels[0];
-                RemoveInputMemoryPanelButton(topPanel, "保存当前记录");
-                RemoveInputMemoryPanelButton(topPanel, "停止并自动保存");
-                RemoveInputMemoryPanelButton(topPanel, "开始/停止录制");
+                FixInputMemoryTopButtonRow(panel, wrapPanels[0]);
+            }
 
-                var recordButton = CreateInputMemoryPanelButton(GetInputMemoryRecordButtonText());
+            if (wrapPanels.Count > 1)
+            {
+                ReplaceInputMemoryPlaybackPanel(panel, wrapPanels[1]);
+            }
+
+            var shortcutGrid = FindVisualChildren<Grid>(panel)
+                .FirstOrDefault(grid => FindVisualChildren<TextBox>(grid).Count() >= 3);
+            if (shortcutGrid != null)
+            {
+                ReplaceInputMemoryShortcutGrid(panel, shortcutGrid);
+            }
+
+            RefreshInputMemoryPanelRecordingButton();
+            LogHelper.LogInfo("[InputMemory] input macro panel fixups applied");
+        }
+
+        private void FixInputMemoryTopButtonRow(Window panel, WrapPanel topPanel)
+        {
+            RemoveInputMemoryPanelButton(topPanel, "保存当前记录");
+            RemoveInputMemoryPanelButton(topPanel, "停止并自动保存");
+            RemoveInputMemoryPanelButton(topPanel, "开始/停止录制");
+
+            if (!topPanel.Children.OfType<Button>().Any(button => string.Equals(button.Tag as string, InputMemoryRecordButtonTag, StringComparison.Ordinal)))
+            {
+                var recordButton = CreateInputMemoryPanelButton(GetInputMemoryRecordButtonText(), 112);
                 recordButton.Tag = InputMemoryRecordButtonTag;
                 recordButton.Click += async delegate
                 {
@@ -69,34 +97,131 @@ namespace CefFlashBrowser.Views
                     RefreshInputMemoryPanelRecordingButton();
                 };
                 topPanel.Children.Insert(0, recordButton);
-
-                var loadButton = topPanel.Children
-                    .OfType<Button>()
-                    .FirstOrDefault(button => string.Equals(button.Content as string, "载入", StringComparison.Ordinal));
-                if (loadButton != null)
-                {
-                    loadButton.ToolTip = "从任意文件夹选择键鼠脚本，并复制到默认脚本文件夹后载入";
-                    loadButton.PreviewMouseLeftButtonDown += async delegate(object sender, MouseButtonEventArgs args)
-                    {
-                        args.Handled = true;
-                        await ImportInputMacroFileIntoDefaultFolderAsync(panel);
-                    };
-                }
             }
 
-            var saveSettingsButton = FindVisualChildren<Button>(panel)
-                .FirstOrDefault(button => string.Equals(button.Content as string, "保存设置", StringComparison.Ordinal));
-            if (saveSettingsButton != null)
+            var loadButton = topPanel.Children
+                .OfType<Button>()
+                .FirstOrDefault(button => string.Equals(button.Content as string, "载入", StringComparison.Ordinal));
+            if (loadButton != null)
             {
-                saveSettingsButton.PreviewMouseLeftButtonDown += delegate(object sender, MouseButtonEventArgs args)
+                loadButton.ToolTip = "从任意文件夹选择键鼠脚本，并复制到默认脚本文件夹后载入";
+                loadButton.PreviewMouseLeftButtonDown += async delegate(object sender, MouseButtonEventArgs args)
                 {
-                    if (TrySaveInputMemoryShortcutSettingsFromPanel(panel))
-                        args.Handled = true;
+                    args.Handled = true;
+                    await ImportInputMacroFileIntoDefaultFolderAsync(panel);
                 };
             }
+        }
 
-            RefreshInputMemoryPanelRecordingButton();
-            LogHelper.LogInfo("[InputMemory] input macro panel fixups applied");
+        private void ReplaceInputMemoryPlaybackPanel(Window panel, WrapPanel playbackPanel)
+        {
+            playbackPanel.Children.Clear();
+
+            var playbackButton = CreateInputMemoryPanelButton(GetInputMemoryPlaybackButtonText(), 96);
+            playbackButton.Tag = InputMemoryPlaybackButtonTag;
+            playbackButton.Click += async delegate
+            {
+                if (browser.IsInputMemoryPlaying)
+                {
+                    browser.StopInputMemoryPlayback();
+                    SetInputMacroHint("键鼠精灵：已停止播放");
+                    RefreshInputMemoryPanelRecordingButton();
+                    return;
+                }
+
+                if (!SaveInputMemoryPlaybackModeFromPanel(panel, showMessage: true))
+                    return;
+
+                var selected = GetSelectedInputMacroFileFromPanel(panel);
+                if (selected != null)
+                    _selectedInputMacroPath = selected.Path;
+
+                await ReplaySelectedInputMacroAsync();
+                RefreshInputMemoryPanelRecordingButton();
+            };
+            playbackPanel.Children.Add(playbackButton);
+
+            var countMode = new RadioButton
+            {
+                Content = "次数播放",
+                GroupName = "InputMemoryPlaybackMode",
+                Tag = InputMemoryReplayCountModeTag,
+                IsChecked = !GlobalData.Settings.InputMacroLoopUntilStopped,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 6, 6)
+            };
+            playbackPanel.Children.Add(countMode);
+
+            var replayCountTextBox = new TextBox
+            {
+                Width = 56,
+                Text = GetInputMacroReplayCount().ToString(),
+                Tag = InputMemoryReplayCountBoxTag,
+                IsEnabled = countMode.IsChecked == true,
+                Margin = new Thickness(0, 0, 12, 6)
+            };
+            playbackPanel.Children.Add(replayCountTextBox);
+
+            var loopMode = new RadioButton
+            {
+                Content = "持续播放",
+                GroupName = "InputMemoryPlaybackMode",
+                Tag = InputMemoryReplayLoopModeTag,
+                IsChecked = GlobalData.Settings.InputMacroLoopUntilStopped,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 12, 6)
+            };
+            playbackPanel.Children.Add(loopMode);
+
+            countMode.Checked += delegate { replayCountTextBox.IsEnabled = true; };
+            loopMode.Checked += delegate { replayCountTextBox.IsEnabled = false; };
+        }
+
+        private void ReplaceInputMemoryShortcutGrid(Window panel, Grid shortcutGrid)
+        {
+            shortcutGrid.Children.Clear();
+            shortcutGrid.ColumnDefinitions.Clear();
+            shortcutGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            shortcutGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(140) });
+            shortcutGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            shortcutGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(140) });
+            shortcutGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var recordBox = AddTaggedShortcutBox(shortcutGrid, "录制", GlobalData.Settings.InputMacroRecordShortcut, 0, InputMemoryRecordShortcutBoxTag);
+            var playbackShortcut = string.IsNullOrWhiteSpace(GlobalData.Settings.InputMacroReplayShortcut)
+                ? GlobalData.Settings.InputMacroStopShortcut
+                : GlobalData.Settings.InputMacroReplayShortcut;
+            AddTaggedShortcutBox(shortcutGrid, "播放", playbackShortcut, 2, InputMemoryPlaybackShortcutBoxTag);
+
+            var saveShortcutButton = CreateInputMemoryPanelButton("保存设置", 78);
+            saveShortcutButton.Click += delegate { TrySaveInputMemoryShortcutSettingsFromPanel(panel); };
+            Grid.SetColumn(saveShortcutButton, 4);
+            shortcutGrid.Children.Add(saveShortcutButton);
+
+            if (string.IsNullOrWhiteSpace(recordBox.Text))
+                recordBox.Text = "Ctrl+F8";
+        }
+
+        private static TextBox AddTaggedShortcutBox(Grid grid, string label, string value, int column, string tag)
+        {
+            var textBlock = new TextBlock
+            {
+                Text = label,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 6, 0)
+            };
+            Grid.SetColumn(textBlock, column);
+            grid.Children.Add(textBlock);
+
+            var textBox = new TextBox
+            {
+                Text = value,
+                Tag = tag,
+                Margin = new Thickness(0, 0, 12, 0)
+            };
+            Grid.SetColumn(textBox, column + 1);
+            grid.Children.Add(textBox);
+            return textBox;
         }
 
         private void RefreshInputMemoryPanelRecordingButton()
@@ -104,18 +229,57 @@ namespace CefFlashBrowser.Views
             if (_inputMemoryPanel == null)
                 return;
 
-            var button = FindVisualChildren<Button>(_inputMemoryPanel)
+            var recordButton = FindVisualChildren<Button>(_inputMemoryPanel)
                 .FirstOrDefault(item => string.Equals(item.Tag as string, InputMemoryRecordButtonTag, StringComparison.Ordinal));
-            if (button != null)
+            if (recordButton != null)
             {
-                button.Content = GetInputMemoryRecordButtonText();
-                button.ToolTip = browser.IsInputMemoryRecording ? "停止录制并自动保存到默认脚本文件夹" : "开始记录键盘和鼠标操作";
+                recordButton.Content = GetInputMemoryRecordButtonText();
+                recordButton.ToolTip = browser.IsInputMemoryRecording ? "停止录制并自动保存到默认脚本文件夹" : "开始记录键盘和鼠标操作";
+            }
+
+            var playbackButton = FindVisualChildren<Button>(_inputMemoryPanel)
+                .FirstOrDefault(item => string.Equals(item.Tag as string, InputMemoryPlaybackButtonTag, StringComparison.Ordinal));
+            if (playbackButton != null)
+            {
+                playbackButton.Content = GetInputMemoryPlaybackButtonText();
+                playbackButton.ToolTip = browser.IsInputMemoryPlaying ? "停止当前播放" : "按右侧模式播放选中脚本";
             }
         }
 
         private string GetInputMemoryRecordButtonText()
         {
             return browser != null && browser.IsInputMemoryRecording ? "停止录制并保存" : "开始录制";
+        }
+
+        private string GetInputMemoryPlaybackButtonText()
+        {
+            return browser != null && browser.IsInputMemoryPlaying ? "停止播放" : "开始播放";
+        }
+
+        private bool SaveInputMemoryPlaybackModeFromPanel(Window panel, bool showMessage)
+        {
+            var countMode = FindVisualChildren<RadioButton>(panel)
+                .FirstOrDefault(item => string.Equals(item.Tag as string, InputMemoryReplayCountModeTag, StringComparison.Ordinal));
+            var countBox = FindVisualChildren<TextBox>(panel)
+                .FirstOrDefault(item => string.Equals(item.Tag as string, InputMemoryReplayCountBoxTag, StringComparison.Ordinal));
+
+            var loopUntilStopped = countMode?.IsChecked != true;
+            var replayCount = GetInputMacroReplayCount();
+            if (!loopUntilStopped)
+            {
+                if (countBox == null || !int.TryParse(countBox.Text, out replayCount) || replayCount <= 0)
+                {
+                    WindowManager.Alert("回放次数必须是大于 0 的整数。", "键鼠精灵");
+                    return false;
+                }
+            }
+
+            GlobalData.Settings.InputMacroReplayCount = replayCount;
+            GlobalData.Settings.InputMacroLoopUntilStopped = loopUntilStopped;
+            GlobalData.SaveSettings();
+            if (showMessage)
+                LogHelper.LogInfo($"[InputMemory] playback mode saved; loop={loopUntilStopped}; count={replayCount}");
+            return true;
         }
 
         private async System.Threading.Tasks.Task ImportInputMacroFileIntoDefaultFolderAsync(Window panel)
@@ -152,6 +316,11 @@ namespace CefFlashBrowser.Views
                 LogHelper.LogError("[InputMemory] failed to import input macro file", e);
                 WindowManager.ShowError(e.Message);
             }
+        }
+
+        private InputMacroFile GetSelectedInputMacroFileFromPanel(Window panel)
+        {
+            return FindVisualChildren<ListBox>(panel).FirstOrDefault()?.SelectedItem as InputMacroFile;
         }
 
         private static void RefreshInputMemoryPanelList(Window panel, string selectedPath)
@@ -193,12 +362,12 @@ namespace CefFlashBrowser.Views
                 panel.Children.Remove(button);
         }
 
-        private static Button CreateInputMemoryPanelButton(string text)
+        private static Button CreateInputMemoryPanelButton(string text, double minWidth)
         {
             return new Button
             {
                 Content = text,
-                MinWidth = 112,
+                MinWidth = minWidth,
                 Height = 28,
                 Margin = new Thickness(0, 0, 8, 6),
                 Padding = new Thickness(8, 0, 8, 0)
@@ -207,53 +376,36 @@ namespace CefFlashBrowser.Views
 
         private static bool TrySaveInputMemoryShortcutSettingsFromPanel(Window panel)
         {
-            var textBoxes = FindVisualChildren<TextBox>(panel).ToList();
-            if (textBoxes.Count < 4)
+            var recordBox = FindVisualChildren<TextBox>(panel)
+                .FirstOrDefault(item => string.Equals(item.Tag as string, InputMemoryRecordShortcutBoxTag, StringComparison.Ordinal));
+            var playbackBox = FindVisualChildren<TextBox>(panel)
+                .FirstOrDefault(item => string.Equals(item.Tag as string, InputMemoryPlaybackShortcutBoxTag, StringComparison.Ordinal));
+
+            if (recordBox == null || playbackBox == null)
                 return false;
 
-            var replayCountBox = textBoxes[0];
-            var recordBox = textBoxes[textBoxes.Count - 3];
-            var replayBox = textBoxes[textBoxes.Count - 2];
-            var stopBox = textBoxes[textBoxes.Count - 1];
-            var loopBox = FindVisualChildren<CheckBox>(panel)
-                .FirstOrDefault(box => string.Equals(box.Content as string, "持续循环直到停止", StringComparison.Ordinal));
-
-            var loopUntilStopped = loopBox?.IsChecked == true;
-            if (!loopUntilStopped && (!int.TryParse(replayCountBox.Text, out var replayCount) || replayCount <= 0))
-            {
-                WindowManager.Alert("回放次数必须是大于 0 的整数。", "键鼠精灵");
-                return true;
-            }
-
             if (!TryParseInputMacroHotkey(recordBox.Text, out _, out _)
-                || !TryParseInputMacroHotkey(replayBox.Text, out _, out _)
-                || !TryParseInputMacroHotkey(stopBox.Text, out _, out _))
+                || !TryParseInputMacroHotkey(playbackBox.Text, out _, out _))
             {
                 WindowManager.Alert("快捷键格式无效。可用 Ctrl/Shift/Alt + 字母、数字、F1-F24、-、=、[、]、\\、;、'、,、.、/、`、Space、Esc。", "键鼠精灵");
                 return true;
             }
 
-            var shortcuts = new[]
+            var recordShortcut = NormalizeInputMacroShortcut(recordBox.Text);
+            var playbackShortcut = NormalizeInputMacroShortcut(playbackBox.Text);
+            if (string.Equals(recordShortcut, playbackShortcut, StringComparison.OrdinalIgnoreCase))
             {
-                NormalizeInputMacroShortcut(recordBox.Text),
-                NormalizeInputMacroShortcut(replayBox.Text),
-                NormalizeInputMacroShortcut(stopBox.Text)
-            };
-
-            if (shortcuts.Distinct(StringComparer.OrdinalIgnoreCase).Count() != shortcuts.Length)
-            {
-                WindowManager.Alert("录制、回放、停止快捷键不能重复。", "键鼠精灵");
+                WindowManager.Alert("录制和播放快捷键不能重复。", "键鼠精灵");
                 return true;
             }
 
-            GlobalData.Settings.InputMacroReplayCount = loopUntilStopped ? GlobalData.Settings.InputMacroReplayCount : int.Parse(replayCountBox.Text);
-            GlobalData.Settings.InputMacroLoopUntilStopped = loopUntilStopped;
-            GlobalData.Settings.InputMacroRecordShortcut = shortcuts[0];
-            GlobalData.Settings.InputMacroReplayShortcut = shortcuts[1];
-            GlobalData.Settings.InputMacroStopShortcut = shortcuts[2];
+            GlobalData.Settings.InputMacroRecordShortcut = recordShortcut;
+            GlobalData.Settings.InputMacroReplayShortcut = playbackShortcut;
+            GlobalData.Settings.InputMacroStopShortcut = playbackShortcut;
+            SaveInputMemoryPlaybackModeFromPanel(panel, showMessage: false);
             GlobalData.SaveSettings();
             WindowManager.Alert("键鼠精灵设置已保存。", "键鼠精灵");
-            LogHelper.LogInfo($"[InputMemory] shortcut settings saved; record={shortcuts[0]} replay={shortcuts[1]} stop={shortcuts[2]}");
+            LogHelper.LogInfo($"[InputMemory] shortcut settings saved; record={recordShortcut} playback={playbackShortcut}");
             return true;
         }
 
