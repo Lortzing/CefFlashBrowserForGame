@@ -6,6 +6,10 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+using System.Windows.Shapes;
+using System.Windows.Threading;
 
 namespace CefFlashBrowser.FlashBrowser
 {
@@ -126,27 +130,40 @@ namespace CefFlashBrowser.FlashBrowser
             var y = ResolveStableInputY(item);
             var modifiers = GetEventFlags(item);
             var mouseEvent = new MouseEvent(x, y, modifiers);
+            var type = (item.Type ?? string.Empty).ToLowerInvariant();
 
-            switch ((item.Type ?? string.Empty).ToLowerInvariant())
+            switch (type)
             {
                 case "mousemove":
                     host.SendMouseMoveEvent(mouseEvent, false);
                     break;
                 case "mousedown":
+                    ShowStableReplayClickMarker(x, y, false);
+                    FeatureDiagnostics.Log("InputMemory", $"stable replay marker; type=mousedown; x={x}; y={y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
+                    host.SendMouseMoveEvent(mouseEvent, false);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), false, 1);
                     break;
                 case "mouseup":
+                    ShowStableReplayClickMarker(x, y, true);
+                    FeatureDiagnostics.Log("InputMemory", $"stable replay marker; type=mouseup; x={x}; y={y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
+                    host.SendMouseMoveEvent(mouseEvent, false);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), true, 1);
                     break;
                 case "click":
+                    ShowStableReplayClickMarker(x, y, false);
+                    host.SendMouseMoveEvent(mouseEvent, false);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), false, 1);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), true, 1);
                     break;
                 case "dblclick":
+                    ShowStableReplayClickMarker(x, y, false);
+                    host.SendMouseMoveEvent(mouseEvent, false);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), false, 2);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), true, 2);
                     break;
                 case "wheel":
+                    ShowStableReplayClickMarker(x, y, true);
+                    host.SendMouseMoveEvent(mouseEvent, false);
                     host.SendMouseWheelEvent(mouseEvent, (int)item.DeltaX, (int)item.DeltaY);
                     break;
                 case "keydown":
@@ -220,6 +237,57 @@ namespace CefFlashBrowser.FlashBrowser
                 item.RatioY = Math.Max(0, Math.Min(1, item.Y.Value / size.Height));
         }
 
+        private void ShowStableReplayClickMarker(int clientX, int clientY, bool release)
+        {
+            if (BrowserHandle == IntPtr.Zero)
+                return;
+
+            var point = new StableReplayNativeMethods.POINT { X = clientX, Y = clientY };
+            if (!StableReplayNativeMethods.ClientToScreen(BrowserHandle, ref point))
+                return;
+
+            const int size = 28;
+            var window = new Window
+            {
+                Width = size,
+                Height = size,
+                Left = point.X - size / 2.0,
+                Top = point.Y - size / 2.0,
+                WindowStyle = WindowStyle.None,
+                AllowsTransparency = true,
+                Background = Brushes.Transparent,
+                Topmost = true,
+                ShowInTaskbar = false,
+                ShowActivated = false,
+                IsHitTestVisible = false,
+                Content = new Grid
+                {
+                    Children =
+                    {
+                        new Ellipse
+                        {
+                            Stroke = release ? Brushes.DeepSkyBlue : Brushes.Red,
+                            StrokeThickness = 3,
+                            Fill = Brushes.Transparent,
+                            Width = size - 4,
+                            Height = size - 4,
+                            HorizontalAlignment = HorizontalAlignment.Center,
+                            VerticalAlignment = VerticalAlignment.Center
+                        }
+                    }
+                }
+            };
+
+            window.Show();
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(360) };
+            timer.Tick += delegate
+            {
+                timer.Stop();
+                window.Close();
+            };
+            timer.Start();
+        }
+
         private readonly struct BrowserClientSize
         {
             public BrowserClientSize(int width, int height)
@@ -236,6 +304,16 @@ namespace CefFlashBrowser.FlashBrowser
         {
             [DllImport("user32.dll")]
             public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+
+            [DllImport("user32.dll")]
+            public static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
+
+            [StructLayout(LayoutKind.Sequential)]
+            public struct POINT
+            {
+                public int X;
+                public int Y;
+            }
 
             [StructLayout(LayoutKind.Sequential)]
             public struct RECT
