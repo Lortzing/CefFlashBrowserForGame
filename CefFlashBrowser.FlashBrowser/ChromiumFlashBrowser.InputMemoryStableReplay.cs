@@ -252,7 +252,7 @@ namespace CefFlashBrowser.FlashBrowser
 
         private static bool IsInputMacroControlVirtualKey(int vk)
         {
-            // Default playback/recording hotkey observed in logs is F2 (VK_F2 = 113). Skipping it prevents
+            // Default playback hotkey observed in logs is F2 (VK_F2 = 113). Skipping it prevents
             // recorded start/stop hotkey events from stopping looped replay after the first iteration.
             return vk == 113;
         }
