@@ -4,8 +4,10 @@ using CefFlashBrowser.Utils.InputMacros;
 using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -16,6 +18,8 @@ namespace CefFlashBrowser.Views
     {
         private const string InputMemoryRecordButtonTag = "InputMemoryRecordButton";
         private const string InputMemoryDeleteButtonTag = "InputMemoryDeleteButton";
+        private const string InputMemoryShowPointsButtonTag = "InputMemoryShowPointsButton";
+        private const string InputMemoryReplayCountBoxTag = "InputMemoryReplayCountBox";
         private const string InputMemoryLoopIntervalBoxTag = "InputMemoryLoopIntervalSecondsBox";
         private static readonly bool InputMemoryPanelFixupsRegistered = RegisterInputMemoryPanelFixups();
 
@@ -108,6 +112,14 @@ namespace CefFlashBrowser.Views
                 var insertAfterLoad = loadButton == null ? -1 : topPanel.Children.IndexOf(loadButton);
                 topPanel.Children.Insert(insertAfterLoad >= 0 ? insertAfterLoad + 1 : topPanel.Children.Count, deleteButton);
             }
+
+            if (!topPanel.Children.OfType<Button>().Any(button => string.Equals(button.Tag as string, InputMemoryShowPointsButtonTag, StringComparison.Ordinal)))
+            {
+                var showButton = CreateInputMemoryPanelButton("展示位置", 78);
+                showButton.Tag = InputMemoryShowPointsButtonTag;
+                showButton.Click += delegate { ShowSelectedInputMacroPoints(panel); };
+                topPanel.Children.Add(showButton);
+            }
         }
 
         private void FixInputMemoryPlaybackRow(Window panel, WrapPanel playbackPanel)
@@ -117,6 +129,13 @@ namespace CefFlashBrowser.Views
                 .FirstOrDefault(box => string.Equals(box.Content as string, "持续循环直到停止", StringComparison.Ordinal) || string.Equals(box.Content as string, "持续播放", StringComparison.Ordinal));
             if (loopCheckBox != null)
                 loopCheckBox.Content = "持续播放";
+
+            var replayCountBox = playbackPanel.Children.OfType<TextBox>().FirstOrDefault();
+            if (replayCountBox != null && !string.Equals(replayCountBox.Tag as string, InputMemoryLoopIntervalBoxTag, StringComparison.Ordinal))
+            {
+                replayCountBox.Tag = InputMemoryReplayCountBoxTag;
+                replayCountBox.ToolTip = "次数播放时的循环次数";
+            }
 
             var replayButton = playbackPanel.Children
                 .OfType<Button>()
@@ -236,10 +255,13 @@ namespace CefFlashBrowser.Views
             var replayCountBox = GetReplayCountTextBox(panel);
             var loopUntilStopped = GetLoopUntilStopped(panel);
             var replayCount = GetInputMacroReplayCount();
-            if (!loopUntilStopped && (replayCountBox == null || !int.TryParse(replayCountBox.Text, out replayCount) || replayCount <= 0))
+            if (!loopUntilStopped)
             {
-                WindowManager.Alert("回放次数必须是大于 0 的整数。", "键鼠精灵");
-                return;
+                if (replayCountBox == null || !int.TryParse(replayCountBox.Text, out replayCount) || replayCount <= 0)
+                {
+                    WindowManager.Alert("回放次数必须是大于 0 的整数。", "键鼠精灵");
+                    return;
+                }
             }
 
             if (!TryGetLoopIntervalMs(panel, out var intervalMs))
@@ -248,6 +270,8 @@ namespace CefFlashBrowser.Views
             GlobalData.Settings.InputMacroReplayCount = replayCount;
             GlobalData.Settings.InputMacroLoopUntilStopped = loopUntilStopped;
             GlobalData.SaveSettings();
+
+            LogHelper.LogInfo($"[InputMemory] panel playback requested; file={selected.Path}; loopUntilStopped={loopUntilStopped}; replayCount={replayCount}; intervalMs={intervalMs}");
 
             try
             {
@@ -276,7 +300,14 @@ namespace CefFlashBrowser.Views
             if (intervalBox == null || string.IsNullOrWhiteSpace(intervalBox.Text))
                 return true;
 
-            if (!double.TryParse(intervalBox.Text, out var seconds) || seconds < 0.01 || seconds > 30)
+            if (!double.TryParse(intervalBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
+                && !double.TryParse(intervalBox.Text, out seconds))
+            {
+                WindowManager.Alert("两次之间间隔时间必须在 0.01 到 30 秒之间。", "键鼠精灵");
+                return false;
+            }
+
+            if (seconds < 0.01 || seconds > 30)
             {
                 WindowManager.Alert("两次之间间隔时间必须在 0.01 到 30 秒之间。", "键鼠精灵");
                 return false;
@@ -295,13 +326,58 @@ namespace CefFlashBrowser.Views
 
         private TextBox GetReplayCountTextBox(Window panel)
         {
-            var textBoxes = FindVisualChildren<TextBox>(panel).ToList();
-            return textBoxes.Count > 0 ? textBoxes[0] : null;
+            return FindVisualChildren<TextBox>(panel)
+                .FirstOrDefault(box => string.Equals(box.Tag as string, InputMemoryReplayCountBoxTag, StringComparison.Ordinal));
         }
 
         private InputMacroFile GetSelectedInputMacroFileFromPanel(Window panel)
         {
             return FindVisualChildren<ListBox>(panel).FirstOrDefault()?.SelectedItem as InputMacroFile;
+        }
+
+        private void ShowSelectedInputMacroPoints(Window panel)
+        {
+            var selected = GetSelectedInputMacroFileFromPanel(panel);
+            if (selected == null)
+            {
+                WindowManager.Alert("请先选择一个脚本。", "键鼠精灵");
+                return;
+            }
+
+            try
+            {
+                var macro = InputMacroService.Load(selected.Path);
+                var mouseEvents = macro.Events
+                    .Where(item => string.Equals(item.Type, "mousedown", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(item.Type, "mouseup", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(item.Type, "wheel", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                var builder = new StringBuilder();
+                builder.AppendLine($"脚本：{macro.Name}");
+                builder.AppendLine($"事件：{macro.Events.Count}，鼠标点：{mouseEvents.Count}");
+                builder.AppendLine("格式：序号 类型 时间ms X,Y RatioX,RatioY Button");
+                for (var i = 0; i < Math.Min(mouseEvents.Count, 40); i++)
+                {
+                    var item = mouseEvents[i];
+                    builder.AppendLine($"{i + 1}. {item.Type} {item.Time:0}ms X={FormatNullable(item.X)} Y={FormatNullable(item.Y)} RX={FormatNullable(item.RatioX)} RY={FormatNullable(item.RatioY)} B={item.Button}");
+                }
+                if (mouseEvents.Count > 40)
+                    builder.AppendLine($"... 还有 {mouseEvents.Count - 40} 个鼠标事件未显示");
+
+                WindowManager.Alert(builder.ToString(), "键鼠位置预览");
+                LogHelper.LogInfo("[InputMemory] position preview shown for " + selected.Path);
+            }
+            catch (Exception e)
+            {
+                LogHelper.LogError("[InputMemory] failed to show input macro positions", e);
+                WindowManager.ShowError(e.Message);
+            }
+        }
+
+        private static string FormatNullable(double? value)
+        {
+            return value.HasValue ? value.Value.ToString("0.####", CultureInfo.InvariantCulture) : "-";
         }
 
         private void DeleteSelectedInputMacroFromPanel(Window panel)
