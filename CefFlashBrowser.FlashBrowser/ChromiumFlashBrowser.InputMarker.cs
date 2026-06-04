@@ -11,8 +11,13 @@ namespace CefFlashBrowser.FlashBrowser
 {
     public partial class ChromiumFlashBrowser
     {
+        public bool ShowInputMemoryClickMarkers { get; set; }
+
         private void ShowInputMemoryScreenMarker(int screenX, int screenY, bool release, string source)
         {
+            if (!ShowInputMemoryClickMarkers)
+                return;
+
             try
             {
                 Dispatcher.BeginInvoke(new Action(() =>
