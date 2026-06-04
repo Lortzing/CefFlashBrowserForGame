@@ -252,9 +252,10 @@ namespace CefFlashBrowser.Views
             try
             {
                 await LoadInputMemoryMacroAsync(selected.Path);
-                await ReplayInputMemoryAsync(
+                await browser.ReplayInputMemoryStableAsync(
                     loopCount: loopUntilStopped ? 0 : replayCount,
-                    loopIntervalMs: intervalMs);
+                    loopIntervalMs: intervalMs,
+                    countdownSeconds: 0);
             }
             catch (Exception e)
             {
