@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -115,9 +114,15 @@ namespace CefFlashBrowser.Views
 
             if (!topPanel.Children.OfType<Button>().Any(button => string.Equals(button.Tag as string, InputMemoryShowPointsButtonTag, StringComparison.Ordinal)))
             {
-                var showButton = CreateInputMemoryPanelButton("展示位置", 78);
+                var showButton = CreateInputMemoryPanelButton(GetInputMemoryMarkerToggleText(), 108);
                 showButton.Tag = InputMemoryShowPointsButtonTag;
-                showButton.Click += delegate { ShowSelectedInputMacroPoints(panel); };
+                showButton.Click += delegate
+                {
+                    browser.ShowInputMemoryClickMarkers = !browser.ShowInputMemoryClickMarkers;
+                    showButton.Content = GetInputMemoryMarkerToggleText();
+                    SetInputMacroHint(browser.ShowInputMemoryClickMarkers ? "键鼠精灵：显示点击位置已开启" : "键鼠精灵：显示点击位置已关闭");
+                    LogHelper.LogInfo($"[InputMemory] click marker toggle; enabled={browser.ShowInputMemoryClickMarkers}");
+                };
                 topPanel.Children.Add(showButton);
             }
         }
@@ -222,6 +227,11 @@ namespace CefFlashBrowser.Views
                 recordButton.ToolTip = browser.IsInputMemoryRecording ? "停止录制并自动保存到默认脚本文件夹" : "开始记录键盘和鼠标操作";
             }
 
+            var markerButton = FindVisualChildren<Button>(_inputMemoryPanel)
+                .FirstOrDefault(item => string.Equals(item.Tag as string, InputMemoryShowPointsButtonTag, StringComparison.Ordinal));
+            if (markerButton != null)
+                markerButton.Content = GetInputMemoryMarkerToggleText();
+
             var replayButton = FindVisualChildren<Button>(_inputMemoryPanel)
                 .FirstOrDefault(button => string.Equals(button.Content as string, "开始播放", StringComparison.Ordinal)
                     || string.Equals(button.Content as string, "停止播放", StringComparison.Ordinal)
@@ -233,6 +243,11 @@ namespace CefFlashBrowser.Views
         private string GetInputMemoryRecordButtonText()
         {
             return browser != null && browser.IsInputMemoryRecording ? "停止录制并保存" : "开始录制";
+        }
+
+        private string GetInputMemoryMarkerToggleText()
+        {
+            return browser != null && browser.ShowInputMemoryClickMarkers ? "隐藏点击位置" : "显示点击位置";
         }
 
         private async System.Threading.Tasks.Task PlaySelectedInputMacroFromPanelAsync(Window panel)
@@ -333,51 +348,6 @@ namespace CefFlashBrowser.Views
         private InputMacroFile GetSelectedInputMacroFileFromPanel(Window panel)
         {
             return FindVisualChildren<ListBox>(panel).FirstOrDefault()?.SelectedItem as InputMacroFile;
-        }
-
-        private void ShowSelectedInputMacroPoints(Window panel)
-        {
-            var selected = GetSelectedInputMacroFileFromPanel(panel);
-            if (selected == null)
-            {
-                WindowManager.Alert("请先选择一个脚本。", "键鼠精灵");
-                return;
-            }
-
-            try
-            {
-                var macro = InputMacroService.Load(selected.Path);
-                var mouseEvents = macro.Events
-                    .Where(item => string.Equals(item.Type, "mousedown", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(item.Type, "mouseup", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(item.Type, "wheel", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-
-                var builder = new StringBuilder();
-                builder.AppendLine($"脚本：{macro.Name}");
-                builder.AppendLine($"事件：{macro.Events.Count}，鼠标点：{mouseEvents.Count}");
-                builder.AppendLine("格式：序号 类型 时间ms X,Y RatioX,RatioY Button");
-                for (var i = 0; i < Math.Min(mouseEvents.Count, 40); i++)
-                {
-                    var item = mouseEvents[i];
-                    builder.AppendLine($"{i + 1}. {item.Type} {item.Time:0}ms X={FormatNullable(item.X)} Y={FormatNullable(item.Y)} RX={FormatNullable(item.RatioX)} RY={FormatNullable(item.RatioY)} B={item.Button}");
-                }
-                if (mouseEvents.Count > 40)
-                    builder.AppendLine($"... 还有 {mouseEvents.Count - 40} 个鼠标事件未显示");
-
-                WindowManager.Alert(builder.ToString(), "键鼠位置预览");
-                LogHelper.LogInfo("[InputMemory] position preview shown for " + selected.Path);
-            }
-            catch (Exception e)
-            {
-                LogHelper.LogError("[InputMemory] failed to show input macro positions", e);
-                WindowManager.ShowError(e.Message);
-            }
-        }
-
-        private static string FormatNullable(double? value)
-        {
-            return value.HasValue ? value.Value.ToString("0.####", CultureInfo.InvariantCulture) : "-";
         }
 
         private void DeleteSelectedInputMacroFromPanel(Window panel)
