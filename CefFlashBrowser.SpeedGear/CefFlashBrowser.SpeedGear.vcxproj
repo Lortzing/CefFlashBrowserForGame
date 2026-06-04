@@ -142,7 +142,6 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="SpeedGear.cpp" />
-    <ClCompile Include="SpeedGearWaitHooks.cpp" />
     <ClCompile Include="ThirdParty\MinHook\src\buffer.c" />
     <ClCompile Include="ThirdParty\MinHook\src\hook.c" />
     <ClCompile Include="ThirdParty\MinHook\src\trampoline.c" />
