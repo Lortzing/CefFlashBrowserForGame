@@ -17,8 +17,7 @@ namespace CefFlashBrowser.Views
     {
         private const int WM_HOTKEY = 0x0312;
         private const int HOTKEY_RECORD = 0x43465201;
-        private const int HOTKEY_REPLAY = 0x43465202;
-        private const int HOTKEY_STOP = 0x43465203;
+        private const int HOTKEY_PLAYBACK = 0x43465202;
         private const uint MOD_ALT = 0x0001;
         private const uint MOD_CONTROL = 0x0002;
         private const uint MOD_SHIFT = 0x0004;
@@ -30,8 +29,7 @@ namespace CefFlashBrowser.Views
         private string _inputMacroOriginalTitle;
         private bool _inputMacroWasRecording;
         private string _registeredRecordShortcut;
-        private string _registeredReplayShortcut;
-        private string _registeredStopShortcut;
+        private string _registeredPlaybackShortcut;
         private HwndSource _inputMacroHotkeySource;
 
         private static bool RegisterInputMacroHotkeyClassHandler()
@@ -86,11 +84,8 @@ namespace CefFlashBrowser.Views
                 case HOTKEY_RECORD:
                     _ = ToggleInputMacroRecordingFromHotkeyAsync();
                     break;
-                case HOTKEY_REPLAY:
-                    _ = ReplayInputMacroFromHotkeyAsync();
-                    break;
-                case HOTKEY_STOP:
-                    _ = StopInputMacroFromHotkeyAsync();
+                case HOTKEY_PLAYBACK:
+                    _ = ToggleInputMacroPlaybackFromHotkeyAsync();
                     break;
             }
             return IntPtr.Zero;
@@ -101,7 +96,7 @@ namespace CefFlashBrowser.Views
             if (browser.IsInputMemoryPlaying)
             {
                 browser.StopInputMemoryPlayback();
-                SetInputMacroHint("键鼠精灵：已停止回放");
+                SetInputMacroHint("键鼠精灵：已停止播放");
                 RefreshInputMemoryPanelRecordingButton();
                 return;
             }
@@ -119,35 +114,23 @@ namespace CefFlashBrowser.Views
             LogHelper.LogInfo("[InputMemory] hotkey start recording");
         }
 
-        private async Task StopInputMacroFromHotkeyAsync()
+        private async Task ToggleInputMacroPlaybackFromHotkeyAsync()
         {
             if (browser.IsInputMemoryRecording)
-            {
-                await StopAndAutoSaveInputMacroAsync("快捷键停止录制");
-                RefreshInputMemoryPanelRecordingButton();
-                return;
-            }
+                await StopAndAutoSaveInputMacroAsync("快捷键播放前自动保存");
 
             if (browser.IsInputMemoryPlaying)
             {
                 browser.StopInputMemoryPlayback();
-                SetInputMacroHint("键鼠精灵：已停止回放");
+                SetInputMacroHint("键鼠精灵：已停止播放");
                 RefreshInputMemoryPanelRecordingButton();
                 LogHelper.LogInfo("[InputMemory] hotkey stop playback");
+                return;
             }
-        }
 
-        private async Task ReplayInputMacroFromHotkeyAsync()
-        {
-            if (browser.IsInputMemoryRecording)
-                await StopAndAutoSaveInputMacroAsync("快捷键回放前自动保存");
-
+            SetInputMacroHint("键鼠精灵：开始播放");
+            await ReplaySelectedInputMacroAsync();
             RefreshInputMemoryPanelRecordingButton();
-            if (!browser.IsInputMemoryPlaying)
-            {
-                SetInputMacroHint("键鼠精灵：开始回放");
-                await ReplaySelectedInputMacroAsync();
-            }
         }
 
         private async Task RefreshInputMacroRecordingUiAndAutoSaveAsync()
@@ -228,23 +211,21 @@ namespace CefFlashBrowser.Views
         private void RegisterInputMacroHotkeysIfNeeded(bool force)
         {
             var record = GlobalData.Settings.InputMacroRecordShortcut ?? string.Empty;
-            var replay = GlobalData.Settings.InputMacroReplayShortcut ?? string.Empty;
-            var stop = GlobalData.Settings.InputMacroStopShortcut ?? string.Empty;
+            var playback = string.IsNullOrWhiteSpace(GlobalData.Settings.InputMacroReplayShortcut)
+                ? GlobalData.Settings.InputMacroStopShortcut ?? string.Empty
+                : GlobalData.Settings.InputMacroReplayShortcut;
             if (!force
                 && string.Equals(record, _registeredRecordShortcut, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(replay, _registeredReplayShortcut, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(stop, _registeredStopShortcut, StringComparison.OrdinalIgnoreCase))
+                && string.Equals(playback, _registeredPlaybackShortcut, StringComparison.OrdinalIgnoreCase))
             {
                 return;
             }
 
             UnregisterInputMacroHotkeys();
             RegisterInputMacroHotkey(HOTKEY_RECORD, record, "record");
-            RegisterInputMacroHotkey(HOTKEY_REPLAY, replay, "replay");
-            RegisterInputMacroHotkey(HOTKEY_STOP, stop, "stop");
+            RegisterInputMacroHotkey(HOTKEY_PLAYBACK, playback, "playback");
             _registeredRecordShortcut = record;
-            _registeredReplayShortcut = replay;
-            _registeredStopShortcut = stop;
+            _registeredPlaybackShortcut = playback;
         }
 
         private void RegisterInputMacroHotkey(int id, string shortcut, string name)
@@ -267,8 +248,7 @@ namespace CefFlashBrowser.Views
                 return;
 
             UnregisterHotKey(hwnd, HOTKEY_RECORD);
-            UnregisterHotKey(hwnd, HOTKEY_REPLAY);
-            UnregisterHotKey(hwnd, HOTKEY_STOP);
+            UnregisterHotKey(hwnd, HOTKEY_PLAYBACK);
         }
 
         private IntPtr GetInputMacroHotkeyWindowHandle()
