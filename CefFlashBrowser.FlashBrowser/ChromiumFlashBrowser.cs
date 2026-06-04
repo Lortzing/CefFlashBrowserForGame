@@ -15,7 +15,7 @@ using System.Windows.Input;
 
 namespace CefFlashBrowser.FlashBrowser
 {
-    public class ChromiumFlashBrowser : ChromiumWebBrowserEx
+    public partial class ChromiumFlashBrowser : ChromiumWebBrowserEx
     {
         public static readonly DependencyProperty BlockedSwfsProperty;
         public static readonly DependencyProperty HasBlockedSwfsProperty;
@@ -292,7 +292,7 @@ namespace CefFlashBrowser.FlashBrowser
                 return;
             }
 
-            FeatureDiagnostics.Log("InputMemory", "start recording requested; backend=cef-host-input");
+            FeatureDiagnostics.Log("InputMemory", "start recording requested; backend=cef-host-input+polling");
             IsInputMemoryRecording = true;
             IsInputMemoryPlaying = false;
             _inputMemoryPlaybackVersion++;
@@ -903,6 +903,7 @@ namespace CefFlashBrowser.FlashBrowser
                 }
             }
             builder.Append('"');
+
             return builder.ToString();
         }
 
