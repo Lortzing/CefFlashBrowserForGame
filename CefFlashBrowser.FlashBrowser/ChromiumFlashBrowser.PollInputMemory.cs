@@ -11,9 +11,6 @@ namespace CefFlashBrowser.FlashBrowser
         private LowLevelInputProc _mouseHookProc;
         private IntPtr _keyboardHook;
         private IntPtr _mouseHook;
-        private int _hookLastMoveTick;
-        private int? _hookLastX;
-        private int? _hookLastY;
         private int _hookLastButtons;
 
         public void StartInputMemoryNativeCapture()
@@ -26,9 +23,6 @@ namespace CefFlashBrowser.FlashBrowser
             _keyboardHook = HookNativeMethods.SetWindowsHookEx(HookNativeMethods.WH_KEYBOARD_LL, _keyboardHookProc, module, 0);
             _mouseHook = HookNativeMethods.SetWindowsHookEx(HookNativeMethods.WH_MOUSE_LL, _mouseHookProc, module, 0);
             _hookLastButtons = 0;
-            _hookLastX = null;
-            _hookLastY = null;
-            _hookLastMoveTick = 0;
 
             FeatureDiagnostics.Log("InputMemory", $"native capture hooks installed; keyboard={_keyboardHook != IntPtr.Zero}; mouse={_mouseHook != IntPtr.Zero}; error={Marshal.GetLastWin32Error()}");
         }
@@ -100,21 +94,7 @@ namespace CefFlashBrowser.FlashBrowser
             switch (msg)
             {
                 case HookNativeMethods.WM_MOUSEMOVE:
-                    var now = Environment.TickCount;
-                    if (_hookLastX.HasValue && _hookLastY.HasValue && now - _hookLastMoveTick < 35)
-                        return;
-                    if (_hookLastX.HasValue && _hookLastY.HasValue)
-                    {
-                        var dx = x - _hookLastX.Value;
-                        var dy = y - _hookLastY.Value;
-                        if (dx * dx + dy * dy < 9)
-                            return;
-                    }
-                    _hookLastX = x;
-                    _hookLastY = y;
-                    _hookLastMoveTick = now;
-                    RecordHookMouse("mousemove", x, y, 0, _hookLastButtons, 0);
-                    break;
+                    return;
 
                 case HookNativeMethods.WM_LBUTTONDOWN:
                     _hookLastButtons |= 1;
@@ -176,7 +156,7 @@ namespace CefFlashBrowser.FlashBrowser
             InputMemoryEventCount = _inputMemoryEvents.Count;
             SetInputMemoryStatus($"正在录制，已记录 {InputMemoryEventCount} 个事件");
 
-            if (InputMemoryEventCount == 1 || InputMemoryEventCount % 20 == 0)
+            if (InputMemoryEventCount == 1 || InputMemoryEventCount % 10 == 0)
                 FeatureDiagnostics.Log("InputMemory", $"native capture count={InputMemoryEventCount}; lastType={item.Type}; x={item.X}; y={item.Y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
         }
 
