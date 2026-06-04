@@ -40,7 +40,7 @@ namespace CefFlashBrowser.FlashBrowser
             _inputMemoryLoopIndex = 0;
             _inputMemoryLoopTotal = loopCount;
 
-            FeatureDiagnostics.Log("InputMemory", $"stable replay started; count={events.Count}; speed={speed:0.###}; loopCount={loopCount}; loopIntervalMs={loopIntervalMs}; mouseMode=screen-sendinput");
+            FeatureDiagnostics.Log("InputMemory", $"stable replay started; count={events.Count}; speed={speed:0.###}; loopCount={loopCount}; loopIntervalMs={loopIntervalMs}; mouseMode=background-postmessage; hwnd={BrowserHandle}");
 
             for (var i = countdownSeconds; i > 0; i--)
             {
@@ -53,15 +53,13 @@ namespace CefFlashBrowser.FlashBrowser
             try
             {
                 var host = GetBrowser()?.GetHost();
-                if (host == null)
+                if (host == null || BrowserHandle == IntPtr.Zero)
                 {
                     SetInputMemoryStatus("浏览器输入通道不可用，不能回放");
-                    FeatureDiagnostics.Log("InputMemory", "stable replay failed: browser host is null");
+                    FeatureDiagnostics.Log("InputMemory", $"stable replay failed: hostNull={host == null}; browserHandle={BrowserHandle}");
                     return;
                 }
 
-                host.SetFocus(true);
-                FocusBrowserWindowForScreenReplay();
                 for (var loop = 0; loop < loops; loop++)
                 {
                     if (playbackVersion != _inputMemoryPlaybackVersion || !IsInputMemoryPlaying)
@@ -69,7 +67,7 @@ namespace CefFlashBrowser.FlashBrowser
 
                     _inputMemoryLoopIndex = loop + 1;
                     _inputMemoryPlayIndex = 0;
-                    FeatureDiagnostics.Log("InputMemory", $"stable replay loop started; loop={_inputMemoryLoopIndex}; total={(loopCount <= 0 ? "infinite" : loopCount.ToString())}");
+                    FeatureDiagnostics.Log("InputMemory", $"stable replay loop started; loop={_inputMemoryLoopIndex}; total={(loopCount <= 0 ? "infinite" : loopCount.ToString())}; hwnd={BrowserHandle}");
 
                     double previousTime = 0;
                     for (var i = 0; i < events.Count; i++)
@@ -87,13 +85,13 @@ namespace CefFlashBrowser.FlashBrowser
                             return;
 
                         _inputMemoryPlayIndex = i + 1;
-                        await Dispatcher.InvokeAsync(() => SendStableHostInputEvent(item));
+                        SendBackgroundInputEvent(item);
                         await RefreshInputMemoryStatusAsync();
                     }
 
                     if (loop + 1 < loops && loopIntervalMs > 0)
                     {
-                        FeatureDiagnostics.Log("InputMemory", $"stable replay loop interval; milliseconds={loopIntervalMs}");
+                        FeatureDiagnostics.Log("InputMemory", $"stable replay loop interval; milliseconds={loopIntervalMs}; nextLoop={loop + 2}");
                         await Task.Delay(loopIntervalMs);
                     }
                 }
@@ -115,94 +113,128 @@ namespace CefFlashBrowser.FlashBrowser
             }
         }
 
-        private void SendStableHostInputEvent(HostInputMemoryEvent item)
+        private void SendBackgroundInputEvent(HostInputMemoryEvent item)
         {
-            var host = GetBrowser()?.GetHost();
-            if (host == null || item == null)
+            if (item == null || BrowserHandle == IntPtr.Zero)
                 return;
 
-            var modifiers = GetEventFlags(item);
             var type = (item.Type ?? string.Empty).ToLowerInvariant();
-
             switch (type)
             {
                 case "mousemove":
-                    {
-                        var clientPoint = ResolveStableClientPoint(item);
-                        host.SendMouseMoveEvent(new MouseEvent(clientPoint.X, clientPoint.Y, modifiers), false);
-                        break;
-                    }
+                    SendBackgroundMouseMove(item);
+                    break;
                 case "mousedown":
-                    SendScreenMouseEvent(item, false);
+                    SendBackgroundMouseButton(item, false);
                     break;
                 case "mouseup":
-                    SendScreenMouseEvent(item, true);
+                    SendBackgroundMouseButton(item, true);
                     break;
                 case "click":
-                    SendScreenMouseEvent(item, false);
-                    SendScreenMouseEvent(item, true);
+                    SendBackgroundMouseButton(item, false);
+                    SendBackgroundMouseButton(item, true);
                     break;
                 case "dblclick":
-                    SendScreenMouseEvent(item, false);
-                    SendScreenMouseEvent(item, true);
-                    SendScreenMouseEvent(item, false);
-                    SendScreenMouseEvent(item, true);
+                    SendBackgroundMouseButton(item, false);
+                    SendBackgroundMouseButton(item, true);
+                    SendBackgroundMouseButton(item, false);
+                    SendBackgroundMouseButton(item, true);
                     break;
                 case "wheel":
-                    SendScreenWheelEvent(item);
+                    SendBackgroundMouseWheel(item);
                     break;
                 case "keydown":
-                    host.SendKeyEvent(CreateKeyEvent(item, KeyEventType.RawKeyDown, modifiers));
+                    SendBackgroundKey(item, false);
                     break;
                 case "keyup":
-                    host.SendKeyEvent(CreateKeyEvent(item, KeyEventType.KeyUp, modifiers));
+                    SendBackgroundKey(item, true);
                     break;
                 case "char":
-                    host.SendKeyEvent(CreateKeyEvent(item, KeyEventType.Char, modifiers));
+                    SendBackgroundChar(item);
                     break;
             }
         }
 
-        private void SendScreenMouseEvent(HostInputMemoryEvent item, bool mouseUp)
+        private void SendBackgroundMouseMove(HostInputMemoryEvent item)
         {
-            var screenPoint = ResolveStableScreenPoint(item, ResolveStableClientPoint(item));
-            ShowInputMemoryScreenMarker(screenPoint.X, screenPoint.Y, mouseUp, "replay");
-            StableReplayNativeMethods.SetCursorPos(screenPoint.X, screenPoint.Y);
-            var flags = GetScreenMouseFlags(item.Button, mouseUp);
-            StableReplayNativeMethods.mouse_event(flags, 0, 0, 0, UIntPtr.Zero);
-            FeatureDiagnostics.Log("InputMemory", $"stable replay screen mouse; type={(mouseUp ? "mouseup" : "mousedown")}; screenX={screenPoint.X}; screenY={screenPoint.Y}; button={item.Button}");
+            var point = ResolveStableClientPoint(item);
+            var lParam = MakeMouseLParam(point.X, point.Y);
+            StableReplayNativeMethods.PostMessage(BrowserHandle, StableReplayNativeMethods.WM_MOUSEMOVE, IntPtr.Zero, lParam);
+            FeatureDiagnostics.Log("InputMemory", $"background mousemove; clientX={point.X}; clientY={point.Y}; hwnd={BrowserHandle}");
         }
 
-        private void SendScreenWheelEvent(HostInputMemoryEvent item)
+        private void SendBackgroundMouseButton(HostInputMemoryEvent item, bool mouseUp)
         {
-            var screenPoint = ResolveStableScreenPoint(item, ResolveStableClientPoint(item));
-            ShowInputMemoryScreenMarker(screenPoint.X, screenPoint.Y, true, "replay");
-            StableReplayNativeMethods.SetCursorPos(screenPoint.X, screenPoint.Y);
-            StableReplayNativeMethods.mouse_event(StableReplayNativeMethods.MOUSEEVENTF_WHEEL, 0, 0, unchecked((uint)(int)item.DeltaY), UIntPtr.Zero);
-            FeatureDiagnostics.Log("InputMemory", $"stable replay screen wheel; screenX={screenPoint.X}; screenY={screenPoint.Y}; delta={item.DeltaY}");
+            var point = ResolveStableClientPoint(item);
+            var lParam = MakeMouseLParam(point.X, point.Y);
+            var message = GetBackgroundMouseMessage(item.Button, mouseUp);
+            var wParam = new IntPtr(mouseUp ? 0 : GetBackgroundMouseWParam(item.Button));
+            StableReplayNativeMethods.PostMessage(BrowserHandle, StableReplayNativeMethods.WM_MOUSEMOVE, IntPtr.Zero, lParam);
+            StableReplayNativeMethods.PostMessage(BrowserHandle, message, wParam, lParam);
+            FeatureDiagnostics.Log("InputMemory", $"background mouse; type={(mouseUp ? "mouseup" : "mousedown")}; clientX={point.X}; clientY={point.Y}; button={item.Button}; hwnd={BrowserHandle}");
         }
 
-        private void FocusBrowserWindowForScreenReplay()
+        private void SendBackgroundMouseWheel(HostInputMemoryEvent item)
         {
-            if (BrowserHandle != IntPtr.Zero)
-            {
-                StableReplayNativeMethods.SetForegroundWindow(BrowserHandle);
-                StableReplayNativeMethods.SetFocus(BrowserHandle);
-                FeatureDiagnostics.Log("InputMemory", $"stable replay focus browser handle={BrowserHandle}");
-            }
+            var point = ResolveStableClientPoint(item);
+            var screenPoint = point;
+            StableReplayNativeMethods.ClientToScreen(BrowserHandle, ref screenPoint);
+            var wParam = new IntPtr(((int)item.DeltaY << 16) & unchecked((int)0xffff0000));
+            var lParam = MakeMouseLParam(screenPoint.X, screenPoint.Y);
+            StableReplayNativeMethods.PostMessage(BrowserHandle, StableReplayNativeMethods.WM_MOUSEWHEEL, wParam, lParam);
+            FeatureDiagnostics.Log("InputMemory", $"background wheel; clientX={point.X}; clientY={point.Y}; delta={item.DeltaY}; hwnd={BrowserHandle}");
         }
 
-        private static uint GetScreenMouseFlags(int? button, bool mouseUp)
+        private void SendBackgroundKey(HostInputMemoryEvent item, bool keyUp)
+        {
+            var vk = item.KeyCode ?? item.NativeKeyCode ?? 0;
+            if (vk <= 0)
+                return;
+
+            var message = keyUp ? StableReplayNativeMethods.WM_KEYUP : StableReplayNativeMethods.WM_KEYDOWN;
+            StableReplayNativeMethods.PostMessage(BrowserHandle, message, new IntPtr(vk), IntPtr.Zero);
+            FeatureDiagnostics.Log("InputMemory", $"background key; type={(keyUp ? "keyup" : "keydown")}; vk={vk}; hwnd={BrowserHandle}");
+        }
+
+        private void SendBackgroundChar(HostInputMemoryEvent item)
+        {
+            var vk = item.KeyCode ?? item.NativeKeyCode ?? 0;
+            if (vk <= 0)
+                return;
+
+            StableReplayNativeMethods.PostMessage(BrowserHandle, StableReplayNativeMethods.WM_CHAR, new IntPtr(vk), IntPtr.Zero);
+            FeatureDiagnostics.Log("InputMemory", $"background char; vk={vk}; hwnd={BrowserHandle}");
+        }
+
+        private static int GetBackgroundMouseMessage(int? button, bool mouseUp)
         {
             switch (button ?? 0)
             {
                 case 1:
-                    return mouseUp ? StableReplayNativeMethods.MOUSEEVENTF_MIDDLEUP : StableReplayNativeMethods.MOUSEEVENTF_MIDDLEDOWN;
+                    return mouseUp ? StableReplayNativeMethods.WM_MBUTTONUP : StableReplayNativeMethods.WM_MBUTTONDOWN;
                 case 2:
-                    return mouseUp ? StableReplayNativeMethods.MOUSEEVENTF_RIGHTUP : StableReplayNativeMethods.MOUSEEVENTF_RIGHTDOWN;
+                    return mouseUp ? StableReplayNativeMethods.WM_RBUTTONUP : StableReplayNativeMethods.WM_RBUTTONDOWN;
                 default:
-                    return mouseUp ? StableReplayNativeMethods.MOUSEEVENTF_LEFTUP : StableReplayNativeMethods.MOUSEEVENTF_LEFTDOWN;
+                    return mouseUp ? StableReplayNativeMethods.WM_LBUTTONUP : StableReplayNativeMethods.WM_LBUTTONDOWN;
             }
+        }
+
+        private static int GetBackgroundMouseWParam(int? button)
+        {
+            switch (button ?? 0)
+            {
+                case 1:
+                    return StableReplayNativeMethods.MK_MBUTTON;
+                case 2:
+                    return StableReplayNativeMethods.MK_RBUTTON;
+                default:
+                    return StableReplayNativeMethods.MK_LBUTTON;
+            }
+        }
+
+        private static IntPtr MakeMouseLParam(int x, int y)
+        {
+            return new IntPtr(((y & 0xffff) << 16) | (x & 0xffff));
         }
 
         private StableReplayNativeMethods.POINT ResolveStableClientPoint(HostInputMemoryEvent item)
@@ -237,23 +269,6 @@ namespace CefFlashBrowser.FlashBrowser
                 X = item.X.HasValue ? ClampToClient((int)Math.Round(item.X.Value), size.Width) : 0,
                 Y = item.Y.HasValue ? ClampToClient((int)Math.Round(item.Y.Value), size.Height) : 0
             };
-        }
-
-        private StableReplayNativeMethods.POINT ResolveStableScreenPoint(HostInputMemoryEvent item, StableReplayNativeMethods.POINT clientPoint)
-        {
-            if (!item.RatioX.HasValue && !item.RatioY.HasValue && item.X.HasValue && item.Y.HasValue)
-            {
-                return new StableReplayNativeMethods.POINT
-                {
-                    X = (int)Math.Round(item.X.Value),
-                    Y = (int)Math.Round(item.Y.Value)
-                };
-            }
-
-            var point = clientPoint;
-            if (BrowserHandle != IntPtr.Zero)
-                StableReplayNativeMethods.ClientToScreen(BrowserHandle, ref point);
-            return point;
         }
 
         private static int ClampToClient(int value, int max)
@@ -309,13 +324,20 @@ namespace CefFlashBrowser.FlashBrowser
 
         private static class StableReplayNativeMethods
         {
-            public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-            public const uint MOUSEEVENTF_LEFTUP = 0x0004;
-            public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
-            public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
-            public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
-            public const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
-            public const uint MOUSEEVENTF_WHEEL = 0x0800;
+            public const int WM_MOUSEMOVE = 0x0200;
+            public const int WM_LBUTTONDOWN = 0x0201;
+            public const int WM_LBUTTONUP = 0x0202;
+            public const int WM_RBUTTONDOWN = 0x0204;
+            public const int WM_RBUTTONUP = 0x0205;
+            public const int WM_MBUTTONDOWN = 0x0207;
+            public const int WM_MBUTTONUP = 0x0208;
+            public const int WM_MOUSEWHEEL = 0x020A;
+            public const int WM_KEYDOWN = 0x0100;
+            public const int WM_KEYUP = 0x0101;
+            public const int WM_CHAR = 0x0102;
+            public const int MK_LBUTTON = 0x0001;
+            public const int MK_RBUTTON = 0x0002;
+            public const int MK_MBUTTON = 0x0010;
 
             [DllImport("user32.dll")]
             public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
@@ -326,17 +348,8 @@ namespace CefFlashBrowser.FlashBrowser
             [DllImport("user32.dll")]
             public static extern bool ScreenToClient(IntPtr hwnd, ref POINT point);
 
-            [DllImport("user32.dll")]
-            public static extern bool SetCursorPos(int X, int Y);
-
-            [DllImport("user32.dll")]
-            public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
-
-            [DllImport("user32.dll")]
-            public static extern bool SetForegroundWindow(IntPtr hWnd);
-
-            [DllImport("user32.dll")]
-            public static extern IntPtr SetFocus(IntPtr hWnd);
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
             [StructLayout(LayoutKind.Sequential)]
             public struct POINT
