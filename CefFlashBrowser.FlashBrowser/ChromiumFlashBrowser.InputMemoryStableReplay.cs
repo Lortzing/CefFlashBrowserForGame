@@ -26,9 +26,7 @@ namespace CefFlashBrowser.FlashBrowser
                 return;
             }
 
-            var events = _inputMemoryEvents
-                .OrderBy(item => item.Time)
-                .ToList();
+            var events = _inputMemoryEvents.OrderBy(item => item.Time).ToList();
             if (events.Count <= 0)
             {
                 SetInputMemoryStatus("当前脚本为空，不能回放");
@@ -126,10 +124,10 @@ namespace CefFlashBrowser.FlashBrowser
             if (host == null || item == null)
                 return;
 
-            var x = ResolveStableInputX(item);
-            var y = ResolveStableInputY(item);
+            var clientPoint = ResolveStableClientPoint(item);
+            var screenPoint = ResolveStableScreenPoint(item, clientPoint);
             var modifiers = GetEventFlags(item);
-            var mouseEvent = new MouseEvent(x, y, modifiers);
+            var mouseEvent = new MouseEvent(clientPoint.X, clientPoint.Y, modifiers);
             var type = (item.Type ?? string.Empty).ToLowerInvariant();
 
             switch (type)
@@ -138,31 +136,31 @@ namespace CefFlashBrowser.FlashBrowser
                     host.SendMouseMoveEvent(mouseEvent, false);
                     break;
                 case "mousedown":
-                    ShowStableReplayClickMarker(x, y, false);
-                    FeatureDiagnostics.Log("InputMemory", $"stable replay marker; type=mousedown; x={x}; y={y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
+                    ShowStableReplayClickMarker(screenPoint.X, screenPoint.Y, false);
+                    FeatureDiagnostics.Log("InputMemory", $"stable replay marker; type=mousedown; clientX={clientPoint.X}; clientY={clientPoint.Y}; screenX={screenPoint.X}; screenY={screenPoint.Y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
                     host.SendMouseMoveEvent(mouseEvent, false);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), false, 1);
                     break;
                 case "mouseup":
-                    ShowStableReplayClickMarker(x, y, true);
-                    FeatureDiagnostics.Log("InputMemory", $"stable replay marker; type=mouseup; x={x}; y={y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
+                    ShowStableReplayClickMarker(screenPoint.X, screenPoint.Y, true);
+                    FeatureDiagnostics.Log("InputMemory", $"stable replay marker; type=mouseup; clientX={clientPoint.X}; clientY={clientPoint.Y}; screenX={screenPoint.X}; screenY={screenPoint.Y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
                     host.SendMouseMoveEvent(mouseEvent, false);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), true, 1);
                     break;
                 case "click":
-                    ShowStableReplayClickMarker(x, y, false);
+                    ShowStableReplayClickMarker(screenPoint.X, screenPoint.Y, false);
                     host.SendMouseMoveEvent(mouseEvent, false);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), false, 1);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), true, 1);
                     break;
                 case "dblclick":
-                    ShowStableReplayClickMarker(x, y, false);
+                    ShowStableReplayClickMarker(screenPoint.X, screenPoint.Y, false);
                     host.SendMouseMoveEvent(mouseEvent, false);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), false, 2);
                     host.SendMouseClickEvent(mouseEvent, GetMouseButton(item.Button), true, 2);
                     break;
                 case "wheel":
-                    ShowStableReplayClickMarker(x, y, true);
+                    ShowStableReplayClickMarker(screenPoint.X, screenPoint.Y, true);
                     host.SendMouseMoveEvent(mouseEvent, false);
                     host.SendMouseWheelEvent(mouseEvent, (int)item.DeltaX, (int)item.DeltaY);
                     break;
@@ -178,24 +176,55 @@ namespace CefFlashBrowser.FlashBrowser
             }
         }
 
-        private int ResolveStableInputX(HostInputMemoryEvent item)
+        private StableReplayNativeMethods.POINT ResolveStableClientPoint(HostInputMemoryEvent item)
         {
             var size = GetBrowserClientSize();
-            if (item.RatioX.HasValue && size.Width > 0)
-                return ClampToClient((int)Math.Round(item.RatioX.Value * size.Width), size.Width);
-            if (item.X.HasValue)
-                return ClampToClient((int)Math.Round(item.X.Value), size.Width);
-            return 0;
+            if (item.RatioX.HasValue && item.RatioY.HasValue && size.Width > 0 && size.Height > 0)
+            {
+                return new StableReplayNativeMethods.POINT
+                {
+                    X = ClampToClient((int)Math.Round(item.RatioX.Value * size.Width), size.Width),
+                    Y = ClampToClient((int)Math.Round(item.RatioY.Value * size.Height), size.Height)
+                };
+            }
+
+            if (item.X.HasValue && item.Y.HasValue && BrowserHandle != IntPtr.Zero)
+            {
+                var point = new StableReplayNativeMethods.POINT
+                {
+                    X = (int)Math.Round(item.X.Value),
+                    Y = (int)Math.Round(item.Y.Value)
+                };
+                if (StableReplayNativeMethods.ScreenToClient(BrowserHandle, ref point))
+                {
+                    point.X = ClampToClient(point.X, size.Width);
+                    point.Y = ClampToClient(point.Y, size.Height);
+                    return point;
+                }
+            }
+
+            return new StableReplayNativeMethods.POINT
+            {
+                X = item.X.HasValue ? ClampToClient((int)Math.Round(item.X.Value), size.Width) : 0,
+                Y = item.Y.HasValue ? ClampToClient((int)Math.Round(item.Y.Value), size.Height) : 0
+            };
         }
 
-        private int ResolveStableInputY(HostInputMemoryEvent item)
+        private StableReplayNativeMethods.POINT ResolveStableScreenPoint(HostInputMemoryEvent item, StableReplayNativeMethods.POINT clientPoint)
         {
-            var size = GetBrowserClientSize();
-            if (item.RatioY.HasValue && size.Height > 0)
-                return ClampToClient((int)Math.Round(item.RatioY.Value * size.Height), size.Height);
-            if (item.Y.HasValue)
-                return ClampToClient((int)Math.Round(item.Y.Value), size.Height);
-            return 0;
+            if (!item.RatioX.HasValue && !item.RatioY.HasValue && item.X.HasValue && item.Y.HasValue)
+            {
+                return new StableReplayNativeMethods.POINT
+                {
+                    X = (int)Math.Round(item.X.Value),
+                    Y = (int)Math.Round(item.Y.Value)
+                };
+            }
+
+            var point = clientPoint;
+            if (BrowserHandle != IntPtr.Zero)
+                StableReplayNativeMethods.ClientToScreen(BrowserHandle, ref point);
+            return point;
         }
 
         private static int ClampToClient(int value, int max)
@@ -237,22 +266,15 @@ namespace CefFlashBrowser.FlashBrowser
                 item.RatioY = Math.Max(0, Math.Min(1, item.Y.Value / size.Height));
         }
 
-        private void ShowStableReplayClickMarker(int clientX, int clientY, bool release)
+        private void ShowStableReplayClickMarker(int screenX, int screenY, bool release)
         {
-            if (BrowserHandle == IntPtr.Zero)
-                return;
-
-            var point = new StableReplayNativeMethods.POINT { X = clientX, Y = clientY };
-            if (!StableReplayNativeMethods.ClientToScreen(BrowserHandle, ref point))
-                return;
-
             const int size = 28;
             var window = new Window
             {
                 Width = size,
                 Height = size,
-                Left = point.X - size / 2.0,
-                Top = point.Y - size / 2.0,
+                Left = screenX - size / 2.0,
+                Top = screenY - size / 2.0,
                 WindowStyle = WindowStyle.None,
                 AllowsTransparency = true,
                 Background = Brushes.Transparent,
@@ -307,6 +329,9 @@ namespace CefFlashBrowser.FlashBrowser
 
             [DllImport("user32.dll")]
             public static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
+
+            [DllImport("user32.dll")]
+            public static extern bool ScreenToClient(IntPtr hwnd, ref POINT point);
 
             [StructLayout(LayoutKind.Sequential)]
             public struct POINT
