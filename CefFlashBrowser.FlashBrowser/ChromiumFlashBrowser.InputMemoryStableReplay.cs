@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 
@@ -40,8 +41,9 @@ namespace CefFlashBrowser.FlashBrowser
             _inputMemoryLoopIndex = 0;
             _inputMemoryLoopTotal = loopCount;
 
-            LogReplayWindowSnapshot("stable replay started", $"count={events.Count}; speed={speed:0.###}; loopCount={loopCount}; loopIntervalMs={loopIntervalMs}; mouseMode=background-postmessage; version={playbackVersion}");
+            LogReplayWindowSnapshot("stable replay started", $"count={events.Count}; speed={speed:0.###}; loopCount={loopCount}; loopIntervalMs={loopIntervalMs}; mouseMode=background-child-postmessage; version={playbackVersion}");
             LogReplayEventSample(events);
+            LogReplayChildWindows();
 
             for (var i = countdownSeconds; i > 0; i--)
             {
@@ -175,33 +177,36 @@ namespace CefFlashBrowser.FlashBrowser
 
         private void SendBackgroundMouseMove(HostInputMemoryEvent item, int eventIndex)
         {
-            var point = ResolveStableClientPoint(item, eventIndex, "mousemove");
+            var target = GetReplayTargetHandle(out var targetClass);
+            var point = ResolveTargetClientPoint(item, eventIndex, "mousemove", target, targetClass);
             var lParam = MakeMouseLParam(point.X, point.Y);
-            var ok = StableReplayNativeMethods.PostMessage(BrowserHandle, StableReplayNativeMethods.WM_MOUSEMOVE, IntPtr.Zero, lParam);
-            LogPostMessage("mousemove", eventIndex, item, StableReplayNativeMethods.WM_MOUSEMOVE, IntPtr.Zero, lParam, point, ok);
+            var ok = StableReplayNativeMethods.PostMessage(target, StableReplayNativeMethods.WM_MOUSEMOVE, IntPtr.Zero, lParam);
+            LogPostMessage("mousemove", eventIndex, item, target, targetClass, StableReplayNativeMethods.WM_MOUSEMOVE, IntPtr.Zero, lParam, point, ok);
         }
 
         private void SendBackgroundMouseButton(HostInputMemoryEvent item, bool mouseUp, int eventIndex)
         {
-            var point = ResolveStableClientPoint(item, eventIndex, mouseUp ? "mouseup" : "mousedown");
+            var target = GetReplayTargetHandle(out var targetClass);
+            var point = ResolveTargetClientPoint(item, eventIndex, mouseUp ? "mouseup" : "mousedown", target, targetClass);
             var lParam = MakeMouseLParam(point.X, point.Y);
             var message = GetBackgroundMouseMessage(item.Button, mouseUp);
             var wParam = new IntPtr(mouseUp ? 0 : GetBackgroundMouseWParam(item.Button));
-            var moveOk = StableReplayNativeMethods.PostMessage(BrowserHandle, StableReplayNativeMethods.WM_MOUSEMOVE, IntPtr.Zero, lParam);
-            var clickOk = StableReplayNativeMethods.PostMessage(BrowserHandle, message, wParam, lParam);
-            LogPostMessage("mousemove-before-button", eventIndex, item, StableReplayNativeMethods.WM_MOUSEMOVE, IntPtr.Zero, lParam, point, moveOk);
-            LogPostMessage(mouseUp ? "mouseup" : "mousedown", eventIndex, item, message, wParam, lParam, point, clickOk);
+            var moveOk = StableReplayNativeMethods.PostMessage(target, StableReplayNativeMethods.WM_MOUSEMOVE, IntPtr.Zero, lParam);
+            var clickOk = StableReplayNativeMethods.PostMessage(target, message, wParam, lParam);
+            LogPostMessage("mousemove-before-button", eventIndex, item, target, targetClass, StableReplayNativeMethods.WM_MOUSEMOVE, IntPtr.Zero, lParam, point, moveOk);
+            LogPostMessage(mouseUp ? "mouseup" : "mousedown", eventIndex, item, target, targetClass, message, wParam, lParam, point, clickOk);
         }
 
         private void SendBackgroundMouseWheel(HostInputMemoryEvent item, int eventIndex)
         {
-            var point = ResolveStableClientPoint(item, eventIndex, "wheel");
+            var target = GetReplayTargetHandle(out var targetClass);
+            var point = ResolveTargetClientPoint(item, eventIndex, "wheel", target, targetClass);
             var screenPoint = point;
-            StableReplayNativeMethods.ClientToScreen(BrowserHandle, ref screenPoint);
+            StableReplayNativeMethods.ClientToScreen(target, ref screenPoint);
             var wParam = new IntPtr(((int)item.DeltaY << 16) & unchecked((int)0xffff0000));
             var lParam = MakeMouseLParam(screenPoint.X, screenPoint.Y);
-            var ok = StableReplayNativeMethods.PostMessage(BrowserHandle, StableReplayNativeMethods.WM_MOUSEWHEEL, wParam, lParam);
-            LogPostMessage("wheel", eventIndex, item, StableReplayNativeMethods.WM_MOUSEWHEEL, wParam, lParam, point, ok, $"screenX={screenPoint.X}; screenY={screenPoint.Y}; delta={item.DeltaY}");
+            var ok = StableReplayNativeMethods.PostMessage(target, StableReplayNativeMethods.WM_MOUSEWHEEL, wParam, lParam);
+            LogPostMessage("wheel", eventIndex, item, target, targetClass, StableReplayNativeMethods.WM_MOUSEWHEEL, wParam, lParam, point, ok, $"screenX={screenPoint.X}; screenY={screenPoint.Y}; delta={item.DeltaY}");
         }
 
         private void SendBackgroundKey(HostInputMemoryEvent item, bool keyUp, int eventIndex)
@@ -213,9 +218,16 @@ namespace CefFlashBrowser.FlashBrowser
                 return;
             }
 
+            if (IsInputMacroControlVirtualKey(vk))
+            {
+                FeatureDiagnostics.Log("InputMemory", $"background key skipped macro-control; index={eventIndex}; type={(keyUp ? "keyup" : "keydown")}; vk={vk}; keyCode={item.KeyCode}; nativeKeyCode={item.NativeKeyCode}; hwnd={BrowserHandle}");
+                return;
+            }
+
+            var target = GetReplayTargetHandle(out var targetClass);
             var message = keyUp ? StableReplayNativeMethods.WM_KEYUP : StableReplayNativeMethods.WM_KEYDOWN;
-            var ok = StableReplayNativeMethods.PostMessage(BrowserHandle, message, new IntPtr(vk), IntPtr.Zero);
-            LogPostMessage(keyUp ? "keyup" : "keydown", eventIndex, item, message, new IntPtr(vk), IntPtr.Zero, null, ok, $"vk={vk}");
+            var ok = StableReplayNativeMethods.PostMessage(target, message, new IntPtr(vk), IntPtr.Zero);
+            LogPostMessage(keyUp ? "keyup" : "keydown", eventIndex, item, target, targetClass, message, new IntPtr(vk), IntPtr.Zero, null, ok, $"vk={vk}");
         }
 
         private void SendBackgroundChar(HostInputMemoryEvent item, int eventIndex)
@@ -227,20 +239,31 @@ namespace CefFlashBrowser.FlashBrowser
                 return;
             }
 
-            var ok = StableReplayNativeMethods.PostMessage(BrowserHandle, StableReplayNativeMethods.WM_CHAR, new IntPtr(vk), IntPtr.Zero);
-            LogPostMessage("char", eventIndex, item, StableReplayNativeMethods.WM_CHAR, new IntPtr(vk), IntPtr.Zero, null, ok, $"vk={vk}");
+            if (IsInputMacroControlVirtualKey(vk))
+            {
+                FeatureDiagnostics.Log("InputMemory", $"background char skipped macro-control; index={eventIndex}; vk={vk}; hwnd={BrowserHandle}");
+                return;
+            }
+
+            var target = GetReplayTargetHandle(out var targetClass);
+            var ok = StableReplayNativeMethods.PostMessage(target, StableReplayNativeMethods.WM_CHAR, new IntPtr(vk), IntPtr.Zero);
+            LogPostMessage("char", eventIndex, item, target, targetClass, StableReplayNativeMethods.WM_CHAR, new IntPtr(vk), IntPtr.Zero, null, ok, $"vk={vk}");
+        }
+
+        private static bool IsInputMacroControlVirtualKey(int vk)
+        {
+            // Default playback/recording hotkey observed in logs is F2 (VK_F2 = 113). Skipping it prevents
+            // recorded start/stop hotkey events from stopping looped replay after the first iteration.
+            return vk == 113;
         }
 
         private static int GetBackgroundMouseMessage(int? button, bool mouseUp)
         {
             switch (button ?? 0)
             {
-                case 1:
-                    return mouseUp ? StableReplayNativeMethods.WM_MBUTTONUP : StableReplayNativeMethods.WM_MBUTTONDOWN;
-                case 2:
-                    return mouseUp ? StableReplayNativeMethods.WM_RBUTTONUP : StableReplayNativeMethods.WM_RBUTTONDOWN;
-                default:
-                    return mouseUp ? StableReplayNativeMethods.WM_LBUTTONUP : StableReplayNativeMethods.WM_LBUTTONDOWN;
+                case 1: return mouseUp ? StableReplayNativeMethods.WM_MBUTTONUP : StableReplayNativeMethods.WM_MBUTTONDOWN;
+                case 2: return mouseUp ? StableReplayNativeMethods.WM_RBUTTONUP : StableReplayNativeMethods.WM_RBUTTONDOWN;
+                default: return mouseUp ? StableReplayNativeMethods.WM_LBUTTONUP : StableReplayNativeMethods.WM_LBUTTONDOWN;
             }
         }
 
@@ -248,12 +271,9 @@ namespace CefFlashBrowser.FlashBrowser
         {
             switch (button ?? 0)
             {
-                case 1:
-                    return StableReplayNativeMethods.MK_MBUTTON;
-                case 2:
-                    return StableReplayNativeMethods.MK_RBUTTON;
-                default:
-                    return StableReplayNativeMethods.MK_LBUTTON;
+                case 1: return StableReplayNativeMethods.MK_MBUTTON;
+                case 2: return StableReplayNativeMethods.MK_RBUTTON;
+                default: return StableReplayNativeMethods.MK_LBUTTON;
             }
         }
 
@@ -262,10 +282,9 @@ namespace CefFlashBrowser.FlashBrowser
             return new IntPtr(((y & 0xffff) << 16) | (x & 0xffff));
         }
 
-        private StableReplayNativeMethods.POINT ResolveStableClientPoint(HostInputMemoryEvent item, int eventIndex, string reason)
+        private StableReplayNativeMethods.POINT ResolveBrowserClientPoint(HostInputMemoryEvent item, int eventIndex, string reason)
         {
             var size = GetBrowserClientSize();
-
             if (item.X.HasValue && item.Y.HasValue)
             {
                 var direct = new StableReplayNativeMethods.POINT
@@ -273,7 +292,7 @@ namespace CefFlashBrowser.FlashBrowser
                     X = ClampToClient((int)Math.Round(item.X.Value), size.Width),
                     Y = ClampToClient((int)Math.Round(item.Y.Value), size.Height)
                 };
-                FeatureDiagnostics.Log("InputMemory", $"resolve client; index={eventIndex}; reason={reason}; source=direct-client-x-y; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; clientX={direct.X}; clientY={direct.Y}; clientSize={size.Width}x{size.Height}; hwnd={BrowserHandle}");
+                FeatureDiagnostics.Log("InputMemory", $"resolve browser client; index={eventIndex}; reason={reason}; source=direct-client-x-y; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; clientX={direct.X}; clientY={direct.Y}; browserClientSize={size.Width}x{size.Height}; browserHwnd={BrowserHandle}");
                 return direct;
             }
 
@@ -284,25 +303,97 @@ namespace CefFlashBrowser.FlashBrowser
                     X = ClampToClient((int)Math.Round(item.RatioX.Value * size.Width), size.Width),
                     Y = ClampToClient((int)Math.Round(item.RatioY.Value * size.Height), size.Height)
                 };
-                FeatureDiagnostics.Log("InputMemory", $"resolve client; index={eventIndex}; reason={reason}; source=ratio-fallback; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; clientX={ratio.X}; clientY={ratio.Y}; clientSize={size.Width}x{size.Height}; hwnd={BrowserHandle}");
+                FeatureDiagnostics.Log("InputMemory", $"resolve browser client; index={eventIndex}; reason={reason}; source=ratio-fallback; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; clientX={ratio.X}; clientY={ratio.Y}; browserClientSize={size.Width}x{size.Height}; browserHwnd={BrowserHandle}");
                 return ratio;
             }
 
-            FeatureDiagnostics.Log("InputMemory", $"resolve client; index={eventIndex}; reason={reason}; source=empty; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; clientSize={size.Width}x{size.Height}; hwnd={BrowserHandle}");
+            FeatureDiagnostics.Log("InputMemory", $"resolve browser client; index={eventIndex}; reason={reason}; source=empty; rawX={item.X}; rawY={item.Y}; ratioX={item.RatioX}; ratioY={item.RatioY}; browserClientSize={size.Width}x{size.Height}; browserHwnd={BrowserHandle}");
             return new StableReplayNativeMethods.POINT { X = 0, Y = 0 };
         }
 
-        private void LogPostMessage(string action, int eventIndex, HostInputMemoryEvent item, int msg, IntPtr wParam, IntPtr lParam, StableReplayNativeMethods.POINT? point, bool ok, string extra = null)
+        private StableReplayNativeMethods.POINT ResolveTargetClientPoint(HostInputMemoryEvent item, int eventIndex, string reason, IntPtr target, string targetClass)
+        {
+            var browserPoint = ResolveBrowserClientPoint(item, eventIndex, reason);
+            if (target == BrowserHandle || target == IntPtr.Zero)
+                return browserPoint;
+
+            var screenPoint = browserPoint;
+            var toScreenOk = StableReplayNativeMethods.ClientToScreen(BrowserHandle, ref screenPoint);
+            var targetPoint = screenPoint;
+            var toTargetOk = StableReplayNativeMethods.ScreenToClient(target, ref targetPoint);
+            FeatureDiagnostics.Log("InputMemory", $"resolve target client; index={eventIndex}; reason={reason}; browserClientX={browserPoint.X}; browserClientY={browserPoint.Y}; screenX={screenPoint.X}; screenY={screenPoint.Y}; targetClientX={targetPoint.X}; targetClientY={targetPoint.Y}; toScreenOk={toScreenOk}; toTargetOk={toTargetOk}; target={target}; targetClass={targetClass}");
+            return targetPoint;
+        }
+
+        private IntPtr GetReplayTargetHandle(out string targetClass)
+        {
+            targetClass = GetWindowClassName(BrowserHandle);
+            var best = BrowserHandle;
+            var bestClass = targetClass;
+            var bestScore = 0;
+            foreach (var child in EnumerateChildWindows(BrowserHandle))
+            {
+                var cls = GetWindowClassName(child);
+                var score = GetReplayTargetScore(cls);
+                if (score > bestScore)
+                {
+                    best = child;
+                    bestClass = cls;
+                    bestScore = score;
+                }
+            }
+            targetClass = bestClass;
+            return best;
+        }
+
+        private static int GetReplayTargetScore(string className)
+        {
+            if (string.IsNullOrEmpty(className)) return 0;
+            if (className.IndexOf("Chrome_RenderWidgetHostHWND", StringComparison.OrdinalIgnoreCase) >= 0) return 100;
+            if (className.IndexOf("Chrome_RenderWidget", StringComparison.OrdinalIgnoreCase) >= 0) return 95;
+            if (className.IndexOf("CefBrowserWindow", StringComparison.OrdinalIgnoreCase) >= 0) return 80;
+            if (className.IndexOf("Chrome_WidgetWin", StringComparison.OrdinalIgnoreCase) >= 0) return 60;
+            return 0;
+        }
+
+        private IEnumerable<IntPtr> EnumerateChildWindows(IntPtr root)
+        {
+            var result = new List<IntPtr>();
+            if (root == IntPtr.Zero) return result;
+            StableReplayNativeMethods.EnumChildWindows(root, (hwnd, lParam) =>
+            {
+                result.Add(hwnd);
+                return true;
+            }, IntPtr.Zero);
+            return result;
+        }
+
+        private string GetWindowClassName(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return string.Empty;
+            var builder = new StringBuilder(256);
+            var length = StableReplayNativeMethods.GetClassName(hwnd, builder, builder.Capacity);
+            return length > 0 ? builder.ToString() : string.Empty;
+        }
+
+        private void LogReplayChildWindows()
+        {
+            var children = EnumerateChildWindows(BrowserHandle).Take(30).ToList();
+            FeatureDiagnostics.Log("InputMemory", $"replay child windows; browserHwnd={BrowserHandle}; browserClass={GetWindowClassName(BrowserHandle)}; count={children.Count}; children={string.Join(" | ", children.Select(hwnd => hwnd + ":" + GetWindowClassName(hwnd)))}");
+            var target = GetReplayTargetHandle(out var targetClass);
+            FeatureDiagnostics.Log("InputMemory", $"replay target selected; target={target}; targetClass={targetClass}; browserHwnd={BrowserHandle}; targetRect={GetWindowRectText(target)}; browserRect={GetWindowRectText(BrowserHandle)}");
+        }
+
+        private void LogPostMessage(string action, int eventIndex, HostInputMemoryEvent item, IntPtr target, string targetClass, int msg, IntPtr wParam, IntPtr lParam, StableReplayNativeMethods.POINT? point, bool ok, string extra = null)
         {
             var error = ok ? 0 : Marshal.GetLastWin32Error();
-            var rectText = GetBrowserWindowRectText();
             var clientText = point.HasValue ? $"clientX={point.Value.X}; clientY={point.Value.Y};" : string.Empty;
-            FeatureDiagnostics.Log("InputMemory", $"post message; action={action}; index={eventIndex}; ok={ok}; error={error}; msg=0x{msg:X}; wParam={wParam}; lParam={lParam}; {clientText} rawX={item?.X}; rawY={item?.Y}; ratioX={item?.RatioX}; ratioY={item?.RatioY}; button={item?.Button}; hwnd={BrowserHandle}; rect={rectText}; {extra}");
+            FeatureDiagnostics.Log("InputMemory", $"post message; action={action}; index={eventIndex}; ok={ok}; error={error}; msg=0x{msg:X}; wParam={wParam}; lParam={lParam}; {clientText} rawX={item?.X}; rawY={item?.Y}; ratioX={item?.RatioX}; ratioY={item?.RatioY}; button={item?.Button}; target={target}; targetClass={targetClass}; targetRect={GetWindowRectText(target)}; browserHwnd={BrowserHandle}; browserRect={GetWindowRectText(BrowserHandle)}; {extra}");
         }
 
         private void LogReplayWindowSnapshot(string title, string extra)
         {
-            FeatureDiagnostics.Log("InputMemory", $"{title}; hwnd={BrowserHandle}; clientSize={GetBrowserClientSize().Width}x{GetBrowserClientSize().Height}; rect={GetBrowserWindowRectText()}; {extra}");
+            FeatureDiagnostics.Log("InputMemory", $"{title}; hwnd={BrowserHandle}; class={GetWindowClassName(BrowserHandle)}; clientSize={GetBrowserClientSize().Width}x{GetBrowserClientSize().Height}; rect={GetWindowRectText(BrowserHandle)}; {extra}");
         }
 
         private void LogReplayEventSample(IList<HostInputMemoryEvent> events)
@@ -316,13 +407,13 @@ namespace CefFlashBrowser.FlashBrowser
                 FeatureDiagnostics.Log("InputMemory", $"replay sample truncated; total={events.Count}");
         }
 
-        private string GetBrowserWindowRectText()
+        private string GetWindowRectText(IntPtr hwnd)
         {
-            if (BrowserHandle == IntPtr.Zero)
+            if (hwnd == IntPtr.Zero)
                 return "hwnd=0";
 
             StableReplayNativeMethods.RECT rect;
-            if (!StableReplayNativeMethods.GetWindowRect(BrowserHandle, out rect))
+            if (!StableReplayNativeMethods.GetWindowRect(hwnd, out rect))
                 return "GetWindowRect=false";
 
             return $"L={rect.Left},T={rect.Top},R={rect.Right},B={rect.Bottom},W={rect.Right - rect.Left},H={rect.Bottom - rect.Top}";
@@ -330,12 +421,9 @@ namespace CefFlashBrowser.FlashBrowser
 
         private static int ClampToClient(int value, int max)
         {
-            if (max <= 0)
-                return Math.Max(0, value);
-            if (value < 0)
-                return 0;
-            if (value >= max)
-                return max - 1;
+            if (max <= 0) return Math.Max(0, value);
+            if (value < 0) return 0;
+            if (value >= max) return max - 1;
             return value;
         }
 
@@ -345,36 +433,22 @@ namespace CefFlashBrowser.FlashBrowser
             {
                 StableReplayNativeMethods.RECT rect;
                 if (StableReplayNativeMethods.GetClientRect(BrowserHandle, out rect))
-                {
-                    var width = Math.Max(1, rect.Right - rect.Left);
-                    var height = Math.Max(1, rect.Bottom - rect.Top);
-                    return new BrowserClientSize(width, height);
-                }
+                    return new BrowserClientSize(Math.Max(1, rect.Right - rect.Left), Math.Max(1, rect.Bottom - rect.Top));
             }
-
             return new BrowserClientSize((int)Math.Max(1, ActualWidth), (int)Math.Max(1, ActualHeight));
         }
 
         private void FillBrowserRatios(HostInputMemoryEvent item)
         {
-            if (item == null || !item.X.HasValue || !item.Y.HasValue)
-                return;
-
+            if (item == null || !item.X.HasValue || !item.Y.HasValue) return;
             var size = GetBrowserClientSize();
-            if (size.Width > 0)
-                item.RatioX = Math.Max(0, Math.Min(1, item.X.Value / size.Width));
-            if (size.Height > 0)
-                item.RatioY = Math.Max(0, Math.Min(1, item.Y.Value / size.Height));
+            if (size.Width > 0) item.RatioX = Math.Max(0, Math.Min(1, item.X.Value / size.Width));
+            if (size.Height > 0) item.RatioY = Math.Max(0, Math.Min(1, item.Y.Value / size.Height));
         }
 
         private readonly struct BrowserClientSize
         {
-            public BrowserClientSize(int width, int height)
-            {
-                Width = width;
-                Height = height;
-            }
-
+            public BrowserClientSize(int width, int height) { Width = width; Height = height; }
             public int Width { get; }
             public int Height { get; }
         }
@@ -396,6 +470,8 @@ namespace CefFlashBrowser.FlashBrowser
             public const int MK_RBUTTON = 0x0002;
             public const int MK_MBUTTON = 0x0010;
 
+            public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+
             [DllImport("user32.dll")]
             public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
 
@@ -411,21 +487,17 @@ namespace CefFlashBrowser.FlashBrowser
             [DllImport("user32.dll", SetLastError = true)]
             public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
-            [StructLayout(LayoutKind.Sequential)]
-            public struct POINT
-            {
-                public int X;
-                public int Y;
-            }
+            [DllImport("user32.dll")]
+            public static extern bool EnumChildWindows(IntPtr hwndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+            [DllImport("user32.dll", CharSet = CharSet.Auto)]
+            public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
             [StructLayout(LayoutKind.Sequential)]
-            public struct RECT
-            {
-                public int Left;
-                public int Top;
-                public int Right;
-                public int Bottom;
-            }
+            public struct POINT { public int X; public int Y; }
+
+            [StructLayout(LayoutKind.Sequential)]
+            public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
         }
     }
 }
