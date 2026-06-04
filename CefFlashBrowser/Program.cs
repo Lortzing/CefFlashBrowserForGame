@@ -176,10 +176,9 @@ namespace CefFlashBrowser
 
             settings.CefCommandLineArgs["autoplay-policy"] = "no-user-gesture-required";
             settings.CefCommandLineArgs["high-dpi-support"] = "1";
-            settings.CefCommandLineArgs["force-device-scale-factor"] = "1";
-            settings.CefCommandLineArgs["disable-features"] = "UseZoomForDSF";
+            settings.CefCommandLineArgs["enable-use-zoom-for-dsf"] = "1";
             Cef.Initialize(settings);
-            AppLogHelper.LogInfo($"CEF initialized. BrowserSubprocessPath={settings.BrowserSubprocessPath}, CachePath={settings.CachePath}, CefLogPath={settings.LogFile}, ForceDeviceScaleFactor=1");
+            AppLogHelper.LogInfo($"CEF initialized. BrowserSubprocessPath={settings.BrowserSubprocessPath}, CachePath={settings.CachePath}, CefLogPath={settings.LogFile}, DpiScaleMode=adaptive-monitor");
         }
 
         private static void OnFeatureDiagnosticMessageLogged(string message)
