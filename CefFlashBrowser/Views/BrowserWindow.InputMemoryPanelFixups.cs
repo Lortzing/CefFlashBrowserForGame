@@ -374,7 +374,7 @@ namespace CefFlashBrowser.Views
             };
         }
 
-        private static bool TrySaveInputMemoryShortcutSettingsFromPanel(Window panel)
+        private bool TrySaveInputMemoryShortcutSettingsFromPanel(Window panel)
         {
             var recordBox = FindVisualChildren<TextBox>(panel)
                 .FirstOrDefault(item => string.Equals(item.Tag as string, InputMemoryRecordShortcutBoxTag, StringComparison.Ordinal));
