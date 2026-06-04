@@ -127,23 +127,28 @@ namespace CefFlashBrowser.FlashBrowser
         }
 
         private void RecordHookMouse(string type, int x, int y, int button, int buttons, int wheelDelta)
-        {
-            var item = new HostInputMemoryEvent
-            {
-                Type = type,
-                Time = _inputMemoryStopwatch.Elapsed.TotalMilliseconds,
-                X = x,
-                Y = y,
-                Button = button,
-                Buttons = buttons,
-                DeltaY = wheelDelta,
-                CtrlKey = IsVirtualKeyDown(HookNativeMethods.VK_CONTROL),
-                ShiftKey = IsVirtualKeyDown(HookNativeMethods.VK_SHIFT),
-                AltKey = IsVirtualKeyDown(HookNativeMethods.VK_MENU),
-                MetaKey = IsVirtualKeyDown(HookNativeMethods.VK_LWIN) || IsVirtualKeyDown(HookNativeMethods.VK_RWIN)
-            };
-            RecordHookInput(item);
-        }
+		{
+			var item = new HostInputMemoryEvent
+			{
+				Type = type,
+				Time = _inputMemoryStopwatch.Elapsed.TotalMilliseconds,
+				X = x,
+				Y = y,
+				Button = button,
+				Buttons = buttons,
+				DeltaY = wheelDelta,
+				CtrlKey = IsVirtualKeyDown(HookNativeMethods.VK_CONTROL),
+				ShiftKey = IsVirtualKeyDown(HookNativeMethods.VK_SHIFT),
+				AltKey = IsVirtualKeyDown(HookNativeMethods.VK_MENU),
+				MetaKey = IsVirtualKeyDown(HookNativeMethods.VK_LWIN) || IsVirtualKeyDown(HookNativeMethods.VK_RWIN)
+			};
+
+			ShowInputMemoryScreenMarker(x, y,
+				string.Equals(type, "mouseup", StringComparison.OrdinalIgnoreCase),
+				"record");
+
+			RecordHookInput(item);
+		}
 
         private void RecordHookInput(HostInputMemoryEvent item)
         {
