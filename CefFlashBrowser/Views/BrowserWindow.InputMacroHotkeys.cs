@@ -67,6 +67,7 @@ namespace CefFlashBrowser.Views
 
             Closed += delegate
             {
+                browser?.StopInputMemoryNativeCapture();
                 UnregisterInputMacroHotkeys();
                 _inputMacroHotkeySource?.RemoveHook(InputMacroHotkeyWndProc);
             };
@@ -109,6 +110,7 @@ namespace CefFlashBrowser.Views
             }
 
             browser.StartInputMemoryRecording();
+            browser.StartInputMemoryNativeCapture();
             SetInputMacroHint("键鼠精灵：开始录制");
             RefreshInputMemoryPanelRecordingButton();
             LogHelper.LogInfo("[InputMemory] hotkey start recording");
@@ -149,6 +151,7 @@ namespace CefFlashBrowser.Views
             if (_inputMacroWasRecording)
             {
                 _inputMacroWasRecording = false;
+                browser.StopInputMemoryNativeCapture();
                 await AutoSaveCurrentInputMacroAsync("录制停止后自动保存");
                 RefreshInputMemoryPanelRecordingButton();
             }
@@ -164,6 +167,7 @@ namespace CefFlashBrowser.Views
                 return;
 
             browser.StopInputMemoryRecording();
+            browser.StopInputMemoryNativeCapture();
             _inputMacroWasRecording = false;
             await AutoSaveCurrentInputMacroAsync(reason);
             RefreshInputMemoryPanelRecordingButton();
