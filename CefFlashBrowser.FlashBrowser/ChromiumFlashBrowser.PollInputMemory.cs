@@ -149,7 +149,7 @@ namespace CefFlashBrowser.FlashBrowser
 
         private void RecordHookMouse(string type, int x, int y, int button, int buttons, int wheelDelta)
         {
-            RecordHookInput(new HostInputMemoryEvent
+            var item = new HostInputMemoryEvent
             {
                 Type = type,
                 Time = _inputMemoryStopwatch.Elapsed.TotalMilliseconds,
@@ -162,7 +162,9 @@ namespace CefFlashBrowser.FlashBrowser
                 ShiftKey = IsVirtualKeyDown(HookNativeMethods.VK_SHIFT),
                 AltKey = IsVirtualKeyDown(HookNativeMethods.VK_MENU),
                 MetaKey = IsVirtualKeyDown(HookNativeMethods.VK_LWIN) || IsVirtualKeyDown(HookNativeMethods.VK_RWIN)
-            });
+            };
+            FillBrowserRatios(item);
+            RecordHookInput(item);
         }
 
         private void RecordHookInput(HostInputMemoryEvent item)
@@ -175,7 +177,7 @@ namespace CefFlashBrowser.FlashBrowser
             SetInputMemoryStatus($"正在录制，已记录 {InputMemoryEventCount} 个事件");
 
             if (InputMemoryEventCount == 1 || InputMemoryEventCount % 20 == 0)
-                FeatureDiagnostics.Log("InputMemory", $"native capture count={InputMemoryEventCount}; lastType={item.Type}");
+                FeatureDiagnostics.Log("InputMemory", $"native capture count={InputMemoryEventCount}; lastType={item.Type}; x={item.X}; y={item.Y}; rx={item.RatioX:0.####}; ry={item.RatioY:0.####}");
         }
 
         private bool IsInputMemoryContextActive(bool requireCursorInsideBrowser, int? screenX = null, int? screenY = null)
